@@ -105,7 +105,7 @@ def calculate_prediction_accuracy(json_path, csv_path):
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    json_file_path = 'agent_results.json'
+    json_file_path = 'agent_results_20.json'
     csv_file_path = 'label_df.csv'
     
     calculate_prediction_accuracy(json_file_path, csv_file_path)
