@@ -182,6 +182,114 @@ def create_montage(image_slices, grid_dims, output_path):
 # 1. 定义基础的文件路径
 base_nii_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_nii2'
 base_roi_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_roi'
+# 这是存放50张图的基础路径
+base_50_slices_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/50_slices_image'
+# 这是存放最终20张裁剪图的新基础路径
+cropped_output_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_20_slices_image'
+
+# 2. 自动获取所有病人的ID列表
+try:
+    patient_ids = [d for d in os.listdir(base_nii_path) if os.path.isdir(os.path.join(base_nii_path, d))]
+    print(f"找到了 {len(patient_ids)} 个病人: {patient_ids}")
+except FileNotFoundError:
+    print(f"错误：找不到输入文件夹 {base_nii_path}。请检查路径是否正确。")
+    exit()
+
+# 3. 循环处理每一个病人
+for patient_id in tqdm(patient_ids, desc="Processing Patients"):
+    print(f"\n--- 开始处理病人: {patient_id} ---")
+
+    # 3.1 一次性加载AP和PVP两组数据
+    # nii.gz -> SimpleITK.Image -> NumPy
+    try:
+        ap_img_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_nii_path, patient_id, 'ap.nii.gz')))
+        ap_seg_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_roi_path, patient_id, 'ap.nrrd')))
+        
+        pvp_img_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_nii_path, patient_id, 'pvp.nii.gz')))
+        pvp_seg_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_roi_path, patient_id, 'pvp.nrrd')))
+    except Exception as e:
+        print(f"加载病人 {patient_id} 的文件时出错: {e}，跳过该病人。")
+        continue
+
+    # 3.2 对AP进行预处理
+    # 将3D数据块的深度标准化为50个切片
+    ap_padded_img, ap_padded_seg = pad_to_max_slices(ap_img_array, ap_seg_array)
+    # 对整个50切片的数据块应用窗宽窗位调整
+    ap_windowed = apply_window(ap_padded_img)
+    # 对掩码进行膨胀以包含边缘
+    ap_mask = ndimage.binary_dilation((ap_padded_seg > 0), iterations=10).astype(np.uint8)
+    # 应用膨胀后的掩码
+    ap_masked_volume = ap_windowed * ap_mask
+
+    # PVP 预处理
+    pvp_padded_img, pvp_padded_seg = pad_to_max_slices(pvp_img_array, pvp_seg_array)
+    pvp_windowed = apply_window(pvp_padded_img)
+    pvp_mask = ndimage.binary_dilation((pvp_padded_seg > 0), iterations=10).astype(np.uint8)
+    pvp_masked_volume = pvp_windowed * pvp_mask
+
+    # 3.3 【关键】只根据 AP 期相的数据来选择10个最佳切片索引
+    print("--- 正在根据 AP 期相选择最佳切片索引 ---")
+    _, selected_indices = select_slices_valid_range_linspace(ap_masked_volume)
+
+    if len(selected_indices) == 0:
+        print(f"警告: 病人 {patient_id} 的AP期相未找到有效切片,跳过。")
+        continue
+
+    # 3.4 使用【同一套索引】分别从AP和PVP中提取切片
+    ap_10_slices = ap_masked_volume[selected_indices]
+    pvp_10_slices = pvp_masked_volume[selected_indices]
+
+    # 3.5 清理并创建最终输出文件夹
+    patient_cropped_output_folder = os.path.join(cropped_output_path, patient_id)
+    if os.path.exists(patient_cropped_output_folder):
+        shutil.rmtree(patient_cropped_output_folder)
+    os.makedirs(patient_cropped_output_folder)
+
+    # 3.6 分别对AP和PVP的10张切片进行裁剪，全部保存在cropped_20_slices_image文件中
+    # 处理AP期相
+    print(f"正在裁剪并保存 AP 期相的 {len(ap_10_slices)} 张切片...")
+    for original_idx, slice_to_crop in zip(selected_indices, ap_10_slices):
+        # 裁剪
+        cropped_slice = crop_to_roi(slice_to_crop)
+        # 使用原始索引来命名文件，例如 ap_cropped_25.png
+        output_path = os.path.join(patient_cropped_output_folder, f'ap_cropped_{str(original_idx).zfill(2)}.png')
+        # 保存
+        imageio.imwrite(output_path, cropped_slice)
+
+    # 处理PVP期相
+    print(f"正在裁剪并保存 PVP 期相的 {len(pvp_10_slices)} 张切片...")
+    for original_idx, slice_to_crop in zip(selected_indices, pvp_10_slices):
+        cropped_slice = crop_to_roi(slice_to_crop)
+        output_path = os.path.join(patient_cropped_output_folder, f'pvp_cropped_{str(original_idx).zfill(2)}.png')
+        imageio.imwrite(output_path, cropped_slice)
+
+    print(f"病人 {patient_id} 的 20 张裁剪切片已成功保存到 '{patient_cropped_output_folder}' 的AP和PVP文件中")
+
+
+print("\n\n所有病人处理完毕!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+# --- 主流程  ---
+
+# 1. 定义基础的文件路径
+base_nii_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_nii2'
+base_roi_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_roi'
 # 这是存放50张图的新基础路径
 base_50_slices_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/50_slices_image'
 # 这是存放最终20张裁剪图的新基础路径
@@ -280,7 +388,7 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
             # 保存
             imageio.imwrite(output_path, cropped_slice)
 
-        print(f"病人 {patient_id} 的 {len(ten_processed_slices)} 张 {phase.upper()} 裁剪切片已保存。")
+
 
 print("\n\n所有病人处理完毕!")
-
+"""
