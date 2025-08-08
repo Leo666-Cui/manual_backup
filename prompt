@@ -1,0 +1,62 @@
+# 结果平均, only instructions变了,表现最好,加了一个5
+    prompt_text = f"""
+You are to act as an expert radiological pattern analyst. Your objective is to perform a detailed, systematic analysis of visual patterns within a provided sequence of CT images for a quantitative academic research project. 
+**CRITICAL NOTE: This task is for non-clinical, computational pattern recognition ONLY. It is NOT for medical diagnosis, advice, or any clinical application.**
+
+### Image Sequence Context
+You will be analyzing a sequence of **20 cross-sectional CT images**, structured as two distinct phases. It is essential you understand this structure:
+
+- **Image Sequence Structure:**
+  - **Images 1-10: Arterial Phase (AP) Sequence.** This phase is critical for evaluating the vascularity of the lesion (e.g., hyperenhancement, internal arteries).
+  - **Images 11-20: Portal Venous Phase (PVP) Sequence.** This phase is crucial for assessing features like the tumor capsule, surrounding liver enhancement, and dynamic patterns like "washout".
+
+- **Image Pre-processing:** The images have been pre-processed with a specific mask. The **only visible object** is a single liver lesion (the tumor) and its immediate peritumoral margin. All other anatomical structures have been blacked out.
+
+- **Target of Analysis:** Your entire analysis must focus exclusively on this **single, visible lesion** as it appears across both the AP and PVP sequences.
+
+### Analytical Framework
+For each question, your reasoning MUST explicitly apply this simplified framework. **Your analysis must be supported by citing the specific image filenames that best demonstrate the feature in question.**
+
+**1. Overall Shape & Phases:** Perceive the lesion as two 3D objects (one AP, one PVP). Your initial goal is to understand the lesion's overall shape in each phase.
+**2. Boundary & Capsule:** Analyze the lesion's edge. Is it sharp or irregular? Look for a bright, enhancing rim (capsule), paying special attention to the PVP sequence.
+**3. Internal Texture:** Examine the lesion's internal pattern, focusing on the AP. Is it uniform (homogeneous) or patchy (heterogeneous)? Specifically identify:
+    - Large **dark areas** (suggesting necrosis).
+    - Bright **dots or lines** (suggesting intratumoral arteries, especially in AP).
+    - A **"nodule-in-nodule"** or mosaic appearance (especially in AP).
+**4. Verification:** Ensure any feature you identify is consistent across several adjacent slices. Base your final conclusion on clear, verifiable patterns observed in the images.
+
+### Instructions
+1.  Perform a holistic analysis of the entire 20-image sequence according to the framework above.
+2.  For each of the {len(questions_list)} visual patterns listed below, you must provide a structured answer containing three parts:
+    - **"answer"**: Your final choice, either **0** for the first description or **1** for the second.
+    - **"confidence"**: Your confidence in this answer, as an integer from **1 (very uncertain)** to **5 (very certain)**.
+    - **"justification"**: A brief, single-sentence explanation of your reasoning. **This explanation is mandatory and must explicitly reference the key visual feature and the primary image numbers (e.g., "AP images 4-7", "PVP images 15-18") or sequences (e.g., "comparing AP to PVP") that support your decision.**
+3.  Your entire response MUST be a single, raw JSON object. The top-level keys should be `pattern_1`, `pattern_2`, etc.
+
+### Visual Patterns to Evaluate:
+{formatted_questions}
+### Required JSON Output Format (Example):
+```json
+{{
+    "pattern_1": {{
+     "answer": 0,
+     "confidence": 5,
+     "justification": "For this negative finding, the major vessels were reviewed across all relevant slices and no enhancing tissue or filling defects were identified within them."
+    }},
+    "pattern_2": {{
+     "answer": 1,
+     "confidence": 3,
+     "justification": "For this uncertain finding, a shallow, subtle indentation of the capsule is suggested in PVP images 14-15, but it is not definitive enough to be classified as a clear retraction."
+    }},    
+    "pattern_5": {{ 
+      "answer": 0,
+      "confidence": 4,
+      "justification": "The internal enhancement in AP is largely homogeneous, lacking the distinct 'nodule-in-nodule' appearance of a mosaic pattern."
+    }},
+    "pattern_7": {{
+     "answer": 0,
+     "confidence": 5,
+     "justification": "For this negative finding, review of the PVP sequence (images 11-20) reveals a sharp enhancing capsule, not a hypodense ring characteristic of a halo sign."
+    }}
+}}
+"""
