@@ -9,38 +9,41 @@ from scipy import ndimage # 确保导入scipy
 from tqdm import tqdm
 import shutil 
 
-
 def pad_to_max_slices(img_volume, seg_volume, max_slices=50):
-    """将3D图像和分割图填充或裁剪到指定的切片数。
-    为了使用 torch.nn.functional.pad 这个高效的填充功能,代码首先将输入的NumPy数组转换成了一个PyTorch张量
-    return 之前,它又将处理好的PyTorch张量通过 .numpy() 方法转换回了NumPy数组"""
-    # 将 NumPy 数组转换为 PyTorch 张量以使用 F.pad
+    """
+    一个更健壮的版本：独立地处理图像和分割掩码，
+    确保它们最终的输出切片数都等于 max_slices。
+    """
+    
+    # --- 独立处理图像 ---
     img_tensor = torch.from_numpy(img_volume.astype(np.float32))
-    seg_tensor = torch.from_numpy(seg_volume.astype(np.float32))
-
-    # PyTorch 的 pad 函数作用于最后的维度，而我们的切片维度在最前面 (z, y, x)
-    # 所以我们需要先调整维度顺序 (z, y, x) -> (y, x, z)
-    img_tensor = img_tensor.permute(1, 2, 0)
-    seg_tensor = seg_tensor.permute(1, 2, 0)
+    img_tensor = img_tensor.permute(1, 2, 0) # (Z, Y, X) -> (Y, X, Z)
     
-    current_slices = img_tensor.shape[-1]
-    
-    if current_slices > max_slices:
-        start = (current_slices - max_slices) // 2
+    current_slices_img = img_tensor.shape[-1]
+    if current_slices_img > max_slices:
+        start = (current_slices_img - max_slices) // 2
         img_tensor = img_tensor[..., start:start + max_slices]
-        seg_tensor = seg_tensor[..., start:start + max_slices]
-    elif current_slices < max_slices:
-        pad_size = max_slices - current_slices
-        # (左, 右) -> (0, pad_size) 表示只在右边（末尾）填充
+    elif current_slices_img < max_slices:
+        pad_size = max_slices - current_slices_img
         img_tensor = F.pad(img_tensor, (0, pad_size), mode='constant', value=0)
+        
+    img_processed = img_tensor.permute(2, 0, 1).numpy() # (Y, X, Z) -> (Z, Y, X)
+
+    # --- 独立处理分割掩码 ---
+    seg_tensor = torch.from_numpy(seg_volume.astype(np.float32))
+    seg_tensor = seg_tensor.permute(1, 2, 0) # (Z, Y, X) -> (Y, X, Z)
+    
+    current_slices_seg = seg_tensor.shape[-1]
+    if current_slices_seg > max_slices:
+        start = (current_slices_seg - max_slices) // 2
+        seg_tensor = seg_tensor[..., start:start + max_slices]
+    elif current_slices_seg < max_slices:
+        pad_size = max_slices - current_slices_seg
         seg_tensor = F.pad(seg_tensor, (0, pad_size), mode='constant', value=0)
+        
+    seg_processed = seg_tensor.permute(2, 0, 1).numpy() # (Y, X, Z) -> (Z, Y, X)
 
-    # 将维度顺序恢复为 (z, y, x)
-    img_processed = img_tensor.permute(2, 0, 1)
-    seg_processed = seg_tensor.permute(2, 0, 1)
-
-    # 将张量转回 NumPy 数组
-    return img_processed.numpy(), seg_processed.numpy()
+    return img_processed, seg_processed
 
 def apply_window(img, window_center=50, window_width=100): # 得到3D的NumPy数组
     """对 NumPy 数组应用窗宽窗位调整，内部使用 PyTorch 进行计算。"""
@@ -207,6 +210,9 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
         
         pvp_img_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_nii_path, patient_id, 'pvp.nii.gz')))
         pvp_seg_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_roi_path, patient_id, 'pvp.nrrd')))
+
+        dp_img_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_nii_path, patient_id, 'dp.nii.gz')))
+        dp_seg_array = sitk.GetArrayFromImage(sitk.ReadImage(os.path.join(base_roi_path, patient_id, 'dp.nrrd')))
     except Exception as e:
         print(f"加载病人 {patient_id} 的文件时出错: {e}，跳过该病人。")
         continue
@@ -227,6 +233,11 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
     pvp_mask = ndimage.binary_dilation((pvp_padded_seg > 0), iterations=10).astype(np.uint8)
     pvp_masked_volume = pvp_windowed * pvp_mask
 
+    # DP 预处理
+    dp_padded_img, dp_padded_seg = pad_to_max_slices(dp_img_array, dp_seg_array)
+    dp_windowed = apply_window(dp_padded_img)
+    dp_mask = ndimage.binary_dilation((dp_padded_seg > 0), iterations=10).astype(np.uint8)
+    dp_masked_volume = dp_windowed * dp_mask
     # 3.3 【关键】只根据 AP 期相的数据来选择10个最佳切片索引
     print("--- 正在根据 AP 期相选择最佳切片索引 ---")
     _, selected_indices = select_slices_valid_range_linspace(ap_masked_volume)
@@ -238,6 +249,7 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
     # 3.4 使用【同一套索引】分别从AP和PVP中提取切片
     ap_10_slices = ap_masked_volume[selected_indices]
     pvp_10_slices = pvp_masked_volume[selected_indices]
+    dp_10_slices = dp_masked_volume[selected_indices]
 
     # 3.5 清理并创建最终输出文件夹
     patient_cropped_output_folder = os.path.join(cropped_output_path, patient_id)
@@ -248,22 +260,35 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
     # 3.6 分别对AP和PVP的10张切片进行裁剪，全部保存在cropped_20_slices_image文件中
     # 处理AP期相
     print(f"正在裁剪并保存 AP 期相的 {len(ap_10_slices)} 张切片...")
+    patient_AP_folder = os.path.join(patient_cropped_output_folder, "AP")
+    os.makedirs(patient_AP_folder)
     for original_idx, slice_to_crop in zip(selected_indices, ap_10_slices):
         # 裁剪
         cropped_slice = crop_to_roi(slice_to_crop)
         # 使用原始索引来命名文件，例如 ap_cropped_25.png
-        output_path = os.path.join(patient_cropped_output_folder, f'ap_cropped_{str(original_idx).zfill(2)}.png')
+        output_path = os.path.join(patient_AP_folder, f'ap_cropped_{str(original_idx).zfill(2)}.png')
         # 保存
         imageio.imwrite(output_path, cropped_slice)
 
     # 处理PVP期相
     print(f"正在裁剪并保存 PVP 期相的 {len(pvp_10_slices)} 张切片...")
+    patient_PVP_folder = os.path.join(patient_cropped_output_folder, "PVP")
+    os.makedirs(patient_PVP_folder)
     for original_idx, slice_to_crop in zip(selected_indices, pvp_10_slices):
         cropped_slice = crop_to_roi(slice_to_crop)
-        output_path = os.path.join(patient_cropped_output_folder, f'pvp_cropped_{str(original_idx).zfill(2)}.png')
+        output_path = os.path.join(patient_PVP_folder, f'pvp_cropped_{str(original_idx).zfill(2)}.png')
         imageio.imwrite(output_path, cropped_slice)
 
-    print(f"病人 {patient_id} 的 20 张裁剪切片已成功保存到 '{patient_cropped_output_folder}' 的AP和PVP文件中")
+    # 处理DP期相
+    print(f"正在裁剪并保存 DP 期相的 {len(dp_10_slices)} 张切片...")
+    patient_DP_folder = os.path.join(patient_cropped_output_folder, "DP")
+    os.makedirs(patient_DP_folder)
+    for original_idx, slice_to_crop in zip(selected_indices, dp_10_slices):
+        cropped_slice = crop_to_roi(slice_to_crop)
+        output_path = os.path.join(patient_DP_folder, f'dp_cropped_{str(original_idx).zfill(2)}.png')
+        imageio.imwrite(output_path, cropped_slice)
+
+    print(f"病人 {patient_id} 的 30 张裁剪切片已成功保存到 '{patient_cropped_output_folder}' 的AP,PVP和DP文件中")
 
 
 print("\n\n所有病人处理完毕!")
