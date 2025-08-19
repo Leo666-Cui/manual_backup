@@ -1,5 +1,6 @@
 import json
 import pandas as pd
+from sklearn.metrics import classification_report, roc_auc_score
 
 def calculate_prediction_accuracy(json_path, csv_path):
     """
@@ -18,25 +19,22 @@ def calculate_prediction_accuracy(json_path, csv_path):
         print(f"错误：找不到文件 {e.filename}。请检查文件路径是否正确。")
         return
 
-    pattern_keys = [f"pattern_{i+1}" for i in range(9)]
+    pattern_keys = [f"pattern_{i+1}" for i in range(21)]
     # feat_columns = ['feat36', 'feat41', 'feat43', 'feat47', 'feat52', 'feat57', 'feat59', 'feat61', 'feat62', 'feat64', 'feat68']
-    feat_columns = ['feat36', 'feat41', 'feat43', 'feat47', 'feat52', 'feat57', 'feat59', 'feat61', 'feat64']
+    #feat_columns = ['feat32', 'feat34', 'feat36', 'feat37', 'feat41', 'feat43', 'feat47', 'feat48', 'feat49', 'feat51', 'feat52', 'feat53', 'feat54', 'feat57', 'feat59', 'feat60', 'feat61', 'feat64', 'feat65', 'feat66', 'feat70']
+    feat_columns = ['feat44', 'feat53', 'feat60', 'feat65', 'feat66', 'feat68', 'feat70']
     feature_map = dict(zip(pattern_keys, feat_columns))
     
     # --- 第3步：初始化计数器 ---
     total_comparisons, correct_predictions = 0, 0
     per_feature_counts = {key: {'correct': 0, 'total': 0} for key in pattern_keys}
     per_patient_results = {}
+    all_predictions = []
+    all_true_labels = []
 
     # --- 第4步：遍历、对比并计算 ---
     print("开始逐一对比预测结果与真实标签...")
-    for patient_id, patient_data in predictions_data.items():
-        # 检查数据格式是否正确，并提取真正的预测结果
-        if not isinstance(patient_data, dict) or 'final_answers' not in patient_data:
-            print(f"警告：病人 {patient_id} 的数据格式不正确或缺少 'final_answers'，跳过。")
-            continue
-        
-        predictions = patient_data['final_answers']
+    for patient_id, predictions in predictions_data.items():
 
         true_labels_row = label_df[label_df['hospital number'] == patient_id]
         if true_labels_row.empty:
@@ -54,8 +52,16 @@ def calculate_prediction_accuracy(json_path, csv_path):
             if pattern_key not in predictions:
                 continue
 
-            model_prediction = predictions[pattern_key]
+            try:
+                model_prediction = predictions[pattern_key]['answer']
+            except (TypeError, KeyError):
+                print(f"警告：病人 {patient_id} 的特征 {pattern_key} 格式不正确或缺少 'answer' 键，跳过。")
+                continue
             true_label = true_labels_row[feat_col].iloc[0]
+            
+            # --- (新增代码：将每次的对比结果存入总列表) ---
+            all_predictions.append(model_prediction)
+            all_true_labels.append(true_label)
 
             pattern_number = pattern_key.replace('pattern_', '')
             
@@ -88,6 +94,14 @@ def calculate_prediction_accuracy(json_path, csv_path):
     # --- 第5步：计算并打印最终结果 ---
     print("\n--- 准确率计算完成 ---")
     if total_comparisons > 0:
+        print("整体分类报告 (Overall Classification Report):")
+        # 直接打印格式化的报告
+        report = classification_report(all_true_labels, all_predictions, target_names=['Class 0', 'Class 1'])
+        print(report)
+
+        overall_auc = roc_auc_score(all_true_labels, all_predictions)
+        print(f"整体 AUC (Overall AUC): {overall_auc:.4f}")
+
         # (打印整体和各特征准确率的代码保持不变)
         overall_accuracy = (correct_predictions / total_comparisons) * 100
         print(f"整体准确率 (Overall Accuracy): {overall_accuracy:.2f}% ({correct_predictions}/{total_comparisons})")
@@ -117,7 +131,7 @@ def calculate_prediction_accuracy(json_path, csv_path):
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    json_file_path = 'agent_results_20_reasoning.json'
+    json_file_path = 'multi_agent_results.json'
     csv_file_path = 'label_df.csv'
     
     calculate_prediction_accuracy(json_file_path, csv_file_path)
