@@ -187,8 +187,8 @@ base_nii_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_n
 base_roi_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/test_Internal_roi'
 # 这是存放50张图的基础路径
 base_50_slices_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/50_slices_image'
-# 这是存放最终20张裁剪图的新基础路径
-cropped_output_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_20_slices_image'
+# 这是存放最终30张裁剪图的新基础路径
+cropped_output_path = '/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_30_slices_image'
 
 # 2. 自动获取所有病人的ID列表
 try:
@@ -257,7 +257,7 @@ for patient_id in tqdm(patient_ids, desc="Processing Patients"):
         shutil.rmtree(patient_cropped_output_folder)
     os.makedirs(patient_cropped_output_folder)
 
-    # 3.6 分别对AP和PVP的10张切片进行裁剪，全部保存在cropped_20_slices_image文件中
+    # 3.6 分别对AP和PVP的10张切片进行裁剪，全部保存在cropped_30_slices_image文件中
     # 处理AP期相
     print(f"正在裁剪并保存 AP 期相的 {len(ap_10_slices)} 张切片...")
     patient_AP_folder = os.path.join(patient_cropped_output_folder, "AP")
