@@ -32,6 +32,61 @@ PROXY_CONFIG = {
 # 【【【重要】】】请修改为您的数据集根目录
 BASE_DATA_PATH = "/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_30_slices_image"
 
+# --- 临床问题定义 (Clinical Question Definitions) ---
+# 将问题列表定义为全局常量，供所有Agent访问
+FEATURE_DEFINITIONS = [
+    {
+        "name": "Enhancing Capsule",
+        "options": [
+            'A distinct, hyper-enhancing rim is NOT identified in the PVP/DP, or any visible rim does not show clear enhancement compared to the AP.',
+            'By comparing phases, a smooth rim is identified that enhances to become distinctly hyper-enhancing in the PVP or DP.'
+        ]
+    },
+    {
+        "name": "Peritumoral Perfusion Alteration",
+        "options": [
+            'No clear perfusion anomalies are seen in the AP, or any observed hyperenhancement around the lesion persists into the PVP.',
+            'A transient perfusion anomaly is confirmed: wedge-shaped or halo-like hyperenhancement is visible around the lesion in the AP and resolves (disappears) in the PVP.'
+        ]
+    },
+    {
+        "name": "Corona Enhancement",
+        "options": [
+            'No radiating vascular pattern is seen at the tumor periphery in any phase.',
+            'A dynamic "corona enhancement" is identified: a radiating vascular pattern appears at the tumor periphery in the late AP or PVP and fades in later phases.'
+        ]
+    },
+    {
+        "name": "Fade Enhancement Pattern",
+        "options": [
+            'Comparing across all phases, the lesion demonstrates a "washout" pattern, becoming hypodense in the PVP or DP.',
+            'Comparing across all phases, the lesion demonstrates a "fade" pattern, with its enhancement in the delayed phase remaining similar to or greater than its enhancement in the AP/PVP.'
+        ]
+    },
+    {
+        "name": "Nodule-in-Nodule Architecture",
+        "options": [
+            'Across all phases, the lesion\'s internal enhancement is either homogeneous or chaotically heterogeneous, lacking a clear, stable hierarchical structure.',
+            'A "nodule-in-nodule" architecture is confirmed across phases: a smaller nodule shows more intense AP enhancement than the larger parent lesion, and this distinction often persists in later phases.'
+        ]
+    },
+    {
+        "name": "Peripheral Washout",
+        "options": [
+            'After initial AP enhancement, the lesion either does not show washout or shows a non-peripheral (diffuse) washout pattern in the PVP/DP.',
+            'After initial AP enhancement, the lesion shows a distinct "peripheral washout" pattern, with only its rim becoming hypoenhancing in the PVP/DP.'
+        ]
+    },
+    {
+        "name": "Delayed Central Enhancement",
+        "options": [
+            'Comparing phases, the central part of the lesion does not show progressive enhancement (e.g., it washes out or remains persistently non-enhancing).',
+            'Comparing phases, the central part of the lesion shows progressive, sustained enhancement, becoming brighter in the delayed phase than it was in the AP/PVP.'
+        ]
+    }
+]
+
+
 
 # --- 2. 辅助函数 (Helper Functions) ---
 
@@ -126,96 +181,39 @@ class Agent:
 
 # --- 4. 工作流各阶段函数 (Workflow Phase Functions) ---
 
-def run_phase1_analysis(image_paths_ap, image_paths_dp, image_paths_pvp):
-    # (此函数负责执行第一阶段的真实VLLM调用)
+def run_phase_1(image_paths_ap, image_paths_dp, image_paths_pvp):
     cprint("\n--- [Phase 1: Parallel Feature Extraction with Professional Questions] ---", 'yellow', attrs=['bold'])
 
-    # 1. 【【新整合的代码】】定义专业的特征名称和对应的描述选项
-    # (这里我们手动提取了您注释中的特征名称)
-    feature_names = [
-        "Enhancing Capsule",
-        "Peritumoral Perfusion Alteration",
-        "Corona Enhancement",
-        "Fade Enhancement Pattern",
-        "Nodule-in-Nodule Architecture",
-        "Peripheral Washout",
-        "Delayed Central Enhancement"
-    ]
-
-    questions_list_professional = [
-        # --- 1. 强化的包膜 (Enhancing Capsule) ---
-        # 注释: 一个真正的强化包膜，其特征在于它在PVP或DP相对于AP的“强化”行为。因此，必须对比期相来确认。
-        ['A distinct, hyper-enhancing rim is NOT identified in the PVP/DP, or any visible rim does not show clear enhancement compared to the AP.',
-        'By comparing phases, a smooth rim is identified that enhances to become distinctly hyper-enhancing in the PVP or DP.'],
-
-        # --- 2. 瘤周异常灌注 (Peritumoral Perfusion Alteration) ---
-        # 注释: 该特征的本质是“一过性”的，即来得快去得也快。因此，必须通过AP和PVP的对比来确认其是否“一过性”。
-        ['No clear perfusion anomalies are seen in the AP, or any observed hyperenhancement around the lesion persists into the PVP.',
-        'A transient perfusion anomaly is confirmed: wedge-shaped or halo-like hyperenhancement is visible around the lesion in the AP and resolves (disappears) in the PVP.'],
-
-        # --- 3. 冠状强化 (Corona Enhancement) ---
-        # 注释: “冠状强化”描述的是一种动态的血流现象，观察它在不同期相的出现和消退才能最终确认。
-        ['No radiating vascular pattern is seen at the tumor periphery in any phase.',
-        'A dynamic "corona enhancement" is identified: a radiating vascular pattern appears at the tumor periphery in the late AP or PVP and fades in later phases.'],
-
-        # --- 4. "Fade" 强化模式 ---
-        # 注释: “Fade”模式的定义本身就是一个跨越所有期相的比较过程，与“Washout”相对。
-        ['Comparing across all phases, the lesion demonstrates a "washout" pattern, becoming hypodense in the PVP or DP.',
-        'Comparing across all phases, the lesion demonstrates a "fade" pattern, with its enhancement in the delayed phase remaining similar to or greater than its enhancement in the AP/PVP.'],
-
-        # --- 5. 结中结模式 (Nodule-in-Nodule Architecture) ---
-        # 注释: 确认“结中结”不仅要看AP期的形态，还要看母子结节在PVP和DP的不同动态行为（如廓清程度不同），才能做出最可靠的判断。
-        ['Across all phases, the lesion\'s internal enhancement is either homogeneous or chaotically heterogeneous, lacking a clear, stable hierarchical structure.',
-        'A "nodule-in-nodule" architecture is confirmed across phases: a smaller nodule shows more intense AP enhancement than the larger parent lesion, and this distinction often persists in later phases.'],
-
-        # --- 6. 瘤周廓清 (Peripheral Washout) ---
-        # 注释: “廓清”本身就需要AP和后续期相的对比。瘤周廓清是特指这种对比性减低发生在肿瘤的边缘。
-        ['After initial AP enhancement, the lesion either does not show washout or shows a non-peripheral (diffuse) washout pattern in the PVP/DP.',
-        'After initial AP enhancement, the lesion shows a distinct "peripheral washout" pattern, with only its rim becoming hypoenhancing in the PVP/DP.'],
-
-        # --- 7. 延迟性中心强化 (Delayed Central Enhancement) ---
-        # 注释: “延迟性”和“渐进性”强化，其定义就是基于对AP/PVP与DP中心区域信号强度变化的比较。
-        ['Comparing phases, the central part of the lesion does not show progressive enhancement (e.g., it washes out or remains persistently non-enhancing).',
-        'Comparing phases, the central part of the lesion shows progressive, sustained enhancement, becoming brighter in the delayed phase than it was in the AP/PVP.']
-    ]
-
-    # 2. 【【新的Prompt生成逻辑】】动态构建高级Prompt
+    # 动态构建高级Prompt (现在从全局常量 FEATURE_DEFINITIONS 读取)
     prompt_sections = []
-    for i, name in enumerate(feature_names):
-        option_0_desc = questions_list_professional[i][0]
-        option_1_desc = questions_list_professional[i][1]
+    json_findings_template = []
+    for i, feature in enumerate(FEATURE_DEFINITIONS):
         prompt_sections.append(f"""
-            --- Feature {i+1}: {name} ---
-            Option 0 (Feature Absent): "{option_0_desc}"
-            Option 1 (Feature Present): "{option_1_desc}"
-            """)
-    
+--- Feature {i+1}: {feature['name']} ---
+Option 0 : "{feature['options'][0]}"
+Option 1 : "{feature['options'][1]}"
+""")
+        json_findings_template.append(
+            f'{{"feature": "{feature["name"]}", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}}'
+        )
+
     # 构建完整的、新的Prompt模板
     questions_prompt_template = f"""
-    You are a meticulous radiologist. Your task is to analyze a set of multi-phase CT images from a specific phase.
-    For each of the 7 features below, you are presented with two descriptive statements: Option 0 (first description) and Option 1 (second description).
-
-    Your tasks are:
-    1. Carefully analyze the provided images, comparing across different phases as needed.
-    2. For each feature, determine which option (0 or 1) most accurately describes the lesion.
-    3. Format your final output as a SINGLE, VALID JSON object. Do not add any explanatory text or markdown formatting outside of the JSON structure.
-
-    {''.join(prompt_sections)}
-
-    Your JSON output must follow this exact structure, containing all 7 features:
-    {{
-    "Phase": "PHASE_ID",
-    "findings": [
-        {{"feature": "Enhancing Capsule", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Peritumoral Perfusion Alteration", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Corona Enhancement", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Fade Enhancement Pattern", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Nodule-in-Nodule Architecture", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Peripheral Washout", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}},
-        {{"feature": "Delayed Central Enhancement", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}}
-    ]
-    }}
-    """
+You are a meticulous radiologist. Your task is to analyze a set of CT images from a specific phase.
+For each of the {len(FEATURE_DEFINITIONS)} features below, you are presented with two descriptive statements: Option 0 and Option 1.
+Your tasks are:
+1. Carefully analyze the provided images.
+2. For each feature, determine which option (0 or 1) most accurately describes the lesion.
+3. Format your final output as a SINGLE, VALID JSON object. Do not add any explanatory text or markdown formatting outside of the JSON structure.
+{''.join(prompt_sections)}
+Your JSON output must follow this exact structure:
+{{
+  "phase": "PHASE_ID",
+  "findings": [
+    {', '.join(json_findings_template)}
+  ]
+}}
+"""
     
     # 3. Agent初始化和调用 (与之前版本相同)
     # 为动脉期(AP)分析师创建指令
@@ -255,7 +253,7 @@ def run_phase1_analysis(image_paths_ap, image_paths_dp, image_paths_pvp):
     reports = {}
     for phase, paths in [("AP", image_paths_ap), ("DP", image_paths_dp), ("PVP", image_paths_pvp)]:
         cprint(f"Running analysis for phase {phase} with professional questions...", 'magenta')
-        prompt = questions_prompt_template.replace("phase_ID", phase)
+        prompt = questions_prompt_template.replace("PHASE_ID", phase)
         # 根据当前循环选择对应的Agent
         if phase == 'AP':
             agent = agent_1
@@ -279,7 +277,7 @@ def run_phase1_analysis(image_paths_ap, image_paths_dp, image_paths_pvp):
             
     return reports
 
-def run_phases_2_and_3(reports_from_phase1):
+def run_phase_2(reports_from_phase1, all_image_paths):
     # (此函数负责执行第二和第三阶段的文本分析)
     cprint("\n" + "="*60, 'cyan')
     cprint("🚀 Executing Phases 2 & 3 of the Workflow 🚀", 'cyan', attrs=['bold'])
@@ -309,7 +307,6 @@ def run_phases_2_and_3(reports_from_phase1):
     Your sole task is to analyze these three reports, focusing on the time dimension to summarize the evolution of each feature. Your output will be a concise, feature-centric evolution report **for the final Chief Radiologist**.
     It is important to highlight any inconsistencies in the findings between the different phase reports if they exist.
     **IMPORTANT: Your output must be a direct, Feature-Centric Evolution Report. Do not include any headers, titles, salutations, or conversational text like 'To:', 'From:', or 'Subject:'.**
-
     """
     agent_4a = Agent(instruction=longitudinal_analyst_prompt, role="Longitudinal Analyst")
     longitudinal_report = agent_4a.chat(prompt_text=committee_input)
@@ -328,14 +325,63 @@ def run_phases_2_and_3(reports_from_phase1):
     cprint("--- Cross-sectional Analyst Output ---", 'green')
     # print(cross_sectional_report)
 
-    cprint("\n--- [Phase 3: Final Synthesized Diagnosis] ---", 'yellow', attrs=['bold'])
-    
-    synthesis_input = f"""
-    [Feature Evolution Report from Longitudinal Analyst]:
-    {longitudinal_report}
-    [Diagnostic Snapshot Report from Cross-sectional Analyst]:
-    {cross_sectional_report}
+
+    # Agent 5: 视觉仲裁官
+    cprint("\n[5. Visual Adjudicator] Performing direct comparative analysis of all images...", 'magenta')
+    # 为Agent 5动态构建Prompt
+    prompt_sections = []
+    for i, feature in enumerate(FEATURE_DEFINITIONS):
+        prompt_sections.append(f"""
+--- Feature {i+1}: {feature['name']} ---
+Option 0 : "{feature['options'][0]}"
+Option 1 : "{feature['options'][1]}"
+""")
+
+    visual_adjudicator_task_prompt = f"""
+As the Visual Adjudicator, you have access to ALL images from ALL phases (AP, DP, PVP).
+Your task is to perform a direct, holistic, comparative analysis of all images to choose the most accurate description for each of the {len(FEATURE_DEFINITIONS)} features below.
+Your final output should be a single report in a clear, point-by-point format. For each feature, state your conclusion (Option 0 or 1) and provide a justification based on your direct, multi-phase visual evidence.
+{''.join(prompt_sections)}
+"""
+print(f"visual_adjudicator_task_prompt: \n{visual_adjudicator_task_prompt}")
+
+    visual_adjudicator_instruction = """
+    You are an expert radiologist, the **Visual Adjudicator** for an AI diagnostic committee.
+    You have been given access to the **complete set of CT images from all phases (AP, DP, PVP)**.
+    Your sole task is to perform a direct, comparative analysis of all images to answer the 7 key questions. Base your answers on the holistic visual evidence.
+    Your output should be a structured report, detailing your findings for each feature with a clear justification based on your direct observation.
+
+    **Example Output Format:**
+    - **Enhancing Capsule:** [Your direct visual finding, e.g., "A clear, enhancing capsule becomes visible in the PVP and DP phases."]
+    - **Nodule-in-Nodule Architecture:** [Your direct visual finding, e.g., "No definitive inner nodule with separate enhancement characteristics is identified across any phase."]
     """
+    agent_5 = Agent(instruction=visual_adjudicator_instruction, role="Visual Adjudicator")
+    # 视觉仲裁官的prompt比较简单，因为它主要依赖于图像输入
+    adjudicator_task_prompt = "Please analyze the provided multi-phase images and provide your direct visual findings for the 7 key radiological features."
+    visual_adjudicator_report = agent_5.chat(prompt_text=visual_adjudicator_task_prompt, image_paths=all_image_paths)
+    cprint("--- Visual Adjudicator (5) Output ---", 'green')
+    print(visual_adjudicator_report)
+
+    return longitudinal_report, cross_sectional_report, visual_adjudicator_report
+
+
+
+def run_phase_3(longitudinal_report, cross_sectional_report, visual_adjudicator_report):
+    """
+    执行第三阶段：运行首席整合官，综合所有分析报告。
+    """
+    cprint("\n--- [Phase 3: Final Decision Making] ---", 'yellow', attrs=['bold'])
+    
+    # 准备给首席整合官的输入，现在包含三份报告
+    synthesis_input = f"""
+    [Feature Evolution Report from Cross-Phase Analyst]:
+    {longitudinal_report}
+    [Diagnostic Snapshot Report from Pattern Recognition Analyst]:
+    {cross_sectional_report}
+    [Visual Adjudicator Report from Direct Image Analysis]:
+    {visual_adjudicator_report}
+    """
+    cprint("\n[6. Chief Synthesizer] Synthesizing all three expert reports...", 'magenta')
 
     # Agent 5: 首席整合官
     chief_synthesizer_prompt = f"""
@@ -343,9 +389,11 @@ You are the **Chief Radiologist** presiding over an AI diagnostic committee. You
 Your input consists of two expert summaries, which were generated by specialist AI analysts:
 1.  A **Feature Evolution Report** from the Longitudinal Analyst.
 2.  A **Diagnostic Snapshot Report** from the Cross-sectional Analyst.
-Your job is to **synthesize these two distinct perspectives** (the 'what changed over time' and the 'what is the pattern now') to form a single, coherent, final report.
+3.  A **Visual Adjudicator Report** (based on direct analysis of all images).
+Your job is to **synthesize these three distinct perspectives** (the 'what changed over time' and the 'what is the pattern now') to form a single, coherent, final report.
 
 Your final output MUST be a single block of text that strictly follows the three-part structure outlined below. It is CRITICAL that you include the exact headings for each section, including the numbering.
+**Crucially, if there is a conflict between the text-based analysis (reports 1 & 2) and the direct visual analysis (report 3), you MUST give precedence to the Visual Adjudicator's report as it is based on the primary image evidence.**
 
 1.  **Core Conclusion:** 
     A concise paragraph summarizing the overall clinical findings and conclusion.
@@ -365,7 +413,7 @@ Your final output MUST be a single block of text that strictly follows the three
     7. Delayed Central Enhancement
 
     For each pattern, the value must be an object with two keys:
-    - "answer": The final binary conclusion (0 for absent, 1 for present).
+    - "answer": The final binary conclusion (0 for first description, 1 for second description).
     - "justification": A brief, concise summary of the reasoning.
 
 Example of the required structure for the JSON part ONLY:
@@ -386,9 +434,9 @@ Example of the required structure for the JSON part ONLY:
 }}
 """
 
-    agent_5 = Agent(instruction=chief_synthesizer_prompt, role="Chief Synthesizer")
-    final_hybrid_output = agent_5.chat(prompt_text=synthesis_input)
-    # print(f"agent_5 output: \n{final_hybrid_output}")
+    agent_6 = Agent(instruction=chief_synthesizer_prompt, role="Chief Synthesizer")
+    final_hybrid_output = agent_6.chat(prompt_text=synthesis_input)
+    # print(f"agent_6 output: \n{final_hybrid_output}")
 
 
     # 【【新】】增加解析逻辑，分离文本报告和JSON对象
@@ -474,11 +522,15 @@ def main():
             continue
 
         # 执行第一阶段
-        phase1_reports = run_phase1_analysis(image_paths_ap, image_paths_dp, image_paths_pvp)
+        phase1_reports = run_phase_1(image_paths_ap, image_paths_dp, image_paths_pvp)
         # print(f"phase1 reports: {phase1_reports}")
         
-        # 执行第二和第三阶段
-        prose_report, structured_summary = run_phases_2_and_3(phase1_reports)
+        # 2. 执行第二阶段
+        all_images = image_paths_ap + image_paths_dp + image_paths_pvp
+        long_report, cross_report, visual_report = run_phase_2(phase1_reports, all_images)
+        
+        # 3. 执行第三阶段
+        prose_report, structured_summary = run_phase_3(long_report, cross_report, visual_report)
         
         # 收集结果
         all_patient_results[patient_id] = structured_summary
