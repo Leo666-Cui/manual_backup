@@ -32,6 +32,18 @@ PROXY_CONFIG = {
 # 【【【重要】】】请修改为您的数据集根目录
 BASE_DATA_PATH = "/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_30_slices_image"
 
+
+# 规则：定义每个特征最终诊断所必需的期相
+FEATURE_PHASE_REQUIREMENTS = {
+    "Enhancing Capsule": ["AP", "PVP", "DP"],
+    "Peritumoral Perfusion Alteration": ["AP", "PVP"],
+    "Corona Enhancement": ["AP", "PVP", "DP"],
+    "Fade Enhancement Pattern": ["AP", "PVP", "DP"],
+    "Nodule-in-Nodule Architecture": ["AP", "PVP", "DP"],
+    "Peripheral Washout": ["AP", "PVP", "DP"],
+    "Delayed Central Enhancement": ["AP", "DP"]
+}
+
 # --- 临床问题定义 (Clinical Question Definitions) ---
 # 将问题列表定义为全局常量，供所有Agent访问
 FEATURE_DEFINITIONS = [
@@ -183,39 +195,8 @@ class Agent:
 
 def run_phase_1(image_paths_ap, image_paths_dp, image_paths_pvp):
     cprint("\n--- [Phase 1: Parallel Feature Extraction with Professional Questions] ---", 'yellow', attrs=['bold'])
-
-    # 动态构建高级Prompt (现在从全局常量 FEATURE_DEFINITIONS 读取)
-    prompt_sections = []
-    json_findings_template = []
-    for i, feature in enumerate(FEATURE_DEFINITIONS):
-        prompt_sections.append(f"""
---- Feature {i+1}: {feature['name']} ---
-Option 0 : "{feature['options'][0]}"
-Option 1 : "{feature['options'][1]}"
-""")
-        json_findings_template.append(
-            f'{{"feature": "{feature["name"]}", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}}'
-        )
-
-    # 构建完整的、新的Prompt模板
-    questions_prompt_template = f"""
-You are a meticulous radiologist. Your task is to analyze a set of CT images from a specific phase.
-For each of the {len(FEATURE_DEFINITIONS)} features below, you are presented with two descriptive statements: Option 0 and Option 1.
-Your tasks are:
-1. Carefully analyze the provided images.
-2. For each feature, determine which option (0 or 1) most accurately describes the lesion.
-3. Format your final output as a SINGLE, VALID JSON object. Do not add any explanatory text or markdown formatting outside of the JSON structure.
-{''.join(prompt_sections)}
-Your JSON output must follow this exact structure:
-{{
-  "phase": "PHASE_ID",
-  "findings": [
-    {', '.join(json_findings_template)}
-  ]
-}}
-"""
     
-    # 3. Agent初始化和调用 (与之前版本相同)
+    # 3. Agent初始化和调用 
     # 为动脉期(AP)分析师创建指令
     ap_analyst_instruction = """
     You are a meticulous radiologist. Your task is to analyze a set of CT images from the **Arterial Phase (AP)**.
@@ -251,19 +232,52 @@ Your JSON output must follow this exact structure:
     agent_3 = Agent(instruction=pvp_analyst_instruction, role="phase PVP Analyst")
 
     reports = {}
-    for phase, paths in [("AP", image_paths_ap), ("DP", image_paths_dp), ("PVP", image_paths_pvp)]:
-        cprint(f"Running analysis for phase {phase} with professional questions...", 'magenta')
-        prompt = questions_prompt_template.replace("PHASE_ID", phase)
-        # 根据当前循环选择对应的Agent
-        if phase == 'AP':
-            agent = agent_1
-        elif phase == 'DP':
-            agent = agent_2
-        else:
-            agent = agent_3
+    for phase, paths, agent in [("AP", image_paths_ap, agent_1), ("DP", image_paths_dp, agent_2), ("PVP", image_paths_pvp, agent_3)]:
         
-        response_text = agent.chat(prompt_text=prompt, image_paths=paths)
-        
+        # 1. 【【核心逻辑】】为当前期相筛选相关问题
+        questions_for_this_phase = []
+        for feature in FEATURE_DEFINITIONS:
+            # 查询知识库，看当前特征是否需要本期相
+            if phase in FEATURE_PHASE_REQUIREMENTS.get(feature['name'], []):
+                questions_for_this_phase.append(feature)
+
+        if not questions_for_this_phase:
+            cprint(f"No relevant questions for phase {phase}. Skipping agent call.", 'yellow')
+            # 为该期相创建一个空的报告
+            reports[phase] = {"phase": phase, "findings": []}
+            continue
+
+        cprint(f"Running analysis for phase {phase}. Asking {len(questions_for_this_phase)} relevant question(s)...", 'magenta')
+
+        # 2. 动态构建只包含相关问题的高级Prompt
+        prompt_sections = []
+        json_findings_template = []
+        for i, feature in enumerate(questions_for_this_phase):
+            prompt_sections.append(f"""
+--- Feature {i+1}: {feature['name']} ---
+Option 0 (Feature Absent): "{feature['options'][0]}"
+Option 1 (Feature Present): "{feature['options'][1]}"
+""")
+            json_findings_template.append(
+                f'{{"feature": "{feature["name"]}", "value": <0_or_1>, "evidence": "Provide a brief clinical justification for your choice here."}}'
+            )
+
+        # 构建完整的、新的Prompt模板
+        questions_prompt_template = f"""
+You are a meticulous radiologist analyzing images from the {phase} phase.
+For each of the {len(questions_for_this_phase)} features below, you are presented with two descriptive statements.
+Your task is to analyze the provided images and determine which option (0 or 1) is most accurate for each feature.
+Format your final output as a SINGLE, VALID JSON object.
+{''.join(prompt_sections)}
+Your JSON output must follow this exact structure:
+{{
+  "phase": "{phase}",
+  "findings": [
+    {', '.join(json_findings_template)}
+  ]
+}}
+"""
+        response_text = agent.chat(prompt_text=questions_prompt_template, image_paths=paths)
         try:
             # 清理并解析JSON
             clean_json_text = response_text.strip().replace("```json", "").replace("```", "")
@@ -273,9 +287,9 @@ Your JSON output must follow this exact structure:
             cprint(f"Error: Failed to parse JSON from Phase {phase} Agent. Response:\n{response_text}", 'red')
             reports[phase] = {"error": "Failed to get a valid JSON response.", "raw_response": response_text}
         
-        # print(f"phase1 output: {reports}")
-            
+    print(f"phase_1 output: {reports}")
     return reports
+
 
 def run_phase_2(reports_from_phase1, all_image_paths):
     # (此函数负责执行第二和第三阶段的文本分析)
@@ -300,26 +314,32 @@ def run_phase_2(reports_from_phase1, all_image_paths):
     {json.dumps(reports_from_phase1['PVP'], indent=2, ensure_ascii=False)}
     """
 
-    # Agent 4a: 纵向分析师
+    # Agent 4a: 纵向分析师：每个问题在三个时期的变化
     longitudinal_analyst_prompt = """
-    You are a senior radiologist acting as a **longitudinal analysis specialist** within an AI diagnostic committee.
-    Your input consists of three structured reports generated by phase-specific AI analysts (AP, DP, PVP).
-    Your sole task is to analyze these three reports, focusing on the time dimension to summarize the evolution of each feature. Your output will be a concise, feature-centric evolution report **for the final Chief Radiologist**.
-    It is important to highlight any inconsistencies in the findings between the different phase reports if they exist.
-    **IMPORTANT: Your output must be a direct, Feature-Centric Evolution Report. Do not include any headers, titles, salutations, or conversational text like 'To:', 'From:', or 'Subject:'.**
+    You are a senior radiologist acting as a **cross-phase analysis specialist** within an AI diagnostic committee.
+    Your input consists of three **partial, phase-specific reports** from AI analysts (AP, DP, PVP). A report for a given phase will only contain findings for features observable in that phase. 
+
+    Your task is to **synthesize these partial reports to create a complete evolutionary summary for all 7 features**.
+    For any given feature, you may only have input from one, two, or all three reports; this is expected. You must deduce the overall evolution based on the available information. For example, to determine "Peritumoral Perfusion Alteration", you should primarily rely on the AP and PVP reports. 
+
+    **IMPORTANT: Do not include any headers, titles, salutations, or conversational text like 'To:', 'From:', or 'Subject:'.**
+    Your output will be a concise, feature-centric evolution report for the final Chief Radiologist. It is important to highlight any inconsistencies in the findings if they exist.
     """
     agent_4a = Agent(instruction=longitudinal_analyst_prompt, role="Longitudinal Analyst")
     longitudinal_report = agent_4a.chat(prompt_text=committee_input)
     cprint("--- Longitudinal Analyst Output ---", 'green')
     # print(longitudinal_report)
 
-    # Agent 4b: 横向分析师
+    # Agent 4b: 横向分析师：每个时期所有问题特征合集
     cross_sectional_analyst_prompt = """
     You are a senior radiologist acting as a **pattern recognition specialist** within an AI diagnostic committee.
-    Your input consists of three structured reports generated by phase-specific AI analysts (AP, DP, PVP).
-    Your sole task is to analyze these three reports, focusing on each phase independently to provide a 'diagnostic snapshot'.
-    Evaluate the combination of features present to determine the clinical picture for each phase. Your output will be a concise, timepoint-centric snapshot report **for the final Chief Radiologist**.
-    """    
+    Your input consists of three **partial, phase-specific reports** from AI analysts (AP, DP, PVP). Each report represents a 'snapshot' of findings for that specific phase.
+
+    Your task is to review these individual snapshots and create a summary report. For each phase (AP, DP, PVP), describe the overall clinical picture based on the combination of features reported for that phase. **Highlight the key diagnostic contribution of each phase.**
+    For example, you might state that the AP phase was crucial for identifying hyperenhancement, while the PVP and DP phases were definitive for confirming washout and an enhancing capsule.
+
+    Your output will be a concise, phase-centric snapshot report for the final Chief Radiologist.
+    """
     agent_4b = Agent(instruction=cross_sectional_analyst_prompt, role="Cross-sectional Analyst")
     cross_sectional_report = agent_4b.chat(prompt_text=committee_input)
     cprint("--- Cross-sectional Analyst Output ---", 'green')
@@ -333,17 +353,16 @@ def run_phase_2(reports_from_phase1, all_image_paths):
     for i, feature in enumerate(FEATURE_DEFINITIONS):
         prompt_sections.append(f"""
 --- Feature {i+1}: {feature['name']} ---
-Option 0 : "{feature['options'][0]}"
-Option 1 : "{feature['options'][1]}"
+Answer 0 : "{feature['options'][0]}"
+Answer 1 : "{feature['options'][1]}"
 """)
 
     visual_adjudicator_task_prompt = f"""
 As the Visual Adjudicator, you have access to ALL images from ALL phases (AP, DP, PVP).
 Your task is to perform a direct, holistic, comparative analysis of all images to choose the most accurate description for each of the {len(FEATURE_DEFINITIONS)} features below.
-Your final output should be a single report in a clear, point-by-point format. For each feature, state your conclusion (Option 0 or 1) and provide a justification based on your direct, multi-phase visual evidence.
+Your final output should be a single report in a clear, point-by-point format. For each feature, state your conclusion (Answer 0 or 1) and provide a justification based on your direct, multi-phase visual evidence.
 {''.join(prompt_sections)}
 """
-print(f"visual_adjudicator_task_prompt: \n{visual_adjudicator_task_prompt}")
 
     visual_adjudicator_instruction = """
     You are an expert radiologist, the **Visual Adjudicator** for an AI diagnostic committee.
@@ -359,8 +378,8 @@ print(f"visual_adjudicator_task_prompt: \n{visual_adjudicator_task_prompt}")
     # 视觉仲裁官的prompt比较简单，因为它主要依赖于图像输入
     adjudicator_task_prompt = "Please analyze the provided multi-phase images and provide your direct visual findings for the 7 key radiological features."
     visual_adjudicator_report = agent_5.chat(prompt_text=visual_adjudicator_task_prompt, image_paths=all_image_paths)
-    cprint("--- Visual Adjudicator (5) Output ---", 'green')
-    print(visual_adjudicator_report)
+    # cprint("--- Visual Adjudicator (5) Output ---", 'green')
+    # print(visual_adjudicator_report)
 
     return longitudinal_report, cross_sectional_report, visual_adjudicator_report
 
@@ -415,6 +434,8 @@ Your final output MUST be a single block of text that strictly follows the three
     For each pattern, the value must be an object with two keys:
     - "answer": The final binary conclusion (0 for first description, 1 for second description).
     - "justification": A brief, concise summary of the reasoning.
+
+    **Before generating the final output, double-check that the JSON syntax is perfect, especially ensuring that a comma (`,`) separates every pattern object from the next.**
 
 Example of the required structure for the JSON part ONLY:
 ```json
@@ -486,7 +507,6 @@ Example of the required structure for the JSON part ONLY:
     print("\n--- 第二部分：结构化总结 (Structured Summary JSON) ---")
     # 使用json.dumps美化打印输出，方便查看
     print(json.dumps(structured_summary, indent=4, ensure_ascii=False))
-    # print(structured_summary)
 
     # 返回两个部分：文本报告和结构化字典
     return prose_report, structured_summary
@@ -528,6 +548,9 @@ def main():
         # 2. 执行第二阶段
         all_images = image_paths_ap + image_paths_dp + image_paths_pvp
         long_report, cross_report, visual_report = run_phase_2(phase1_reports, all_images)
+        print(f"long_report: \n{long_report}")
+        print(f"cross_report: \n{cross_report}\n")
+        print(f"visual_report: \n{visual_report}\n")
         
         # 3. 执行第三阶段
         prose_report, structured_summary = run_phase_3(long_report, cross_report, visual_report)
@@ -535,11 +558,6 @@ def main():
         # 收集结果
         all_patient_results[patient_id] = structured_summary
 
-        # cprint(f"\n--- Final Hybrid Report for Patient {patient_id} ---", 'cyan', attrs=['bold'])
-        # print("--- Prose Report ---")
-        # print(prose_report)
-        # print("\n--- Structured Summary (JSON) ---")
-        # print(json.dumps(structured_summary, indent=4, ensure_ascii=False))
 
     # 将所有病人的结果保存到一个JSON文件中
     output_filename = "multi_agent_results.json"
