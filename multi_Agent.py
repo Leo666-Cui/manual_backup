@@ -38,7 +38,9 @@ BASE_DATA_PATH = "/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_30_sli
 FEATURE_PHASE_REQUIREMENTS = {
     "Enhancing Capsule": ["AP", "PVP", "DP"],
     "Peritumoral Perfusion Alteration": ["AP", "PVP"],
+    "Peritumoral Hypodense Halo": ["PVP", "DP"],  
     "Corona Enhancement": ["AP", "PVP", "DP"],
+    "Custom TTPVI Feature": ["AP", "PVP", "DP"],
     "Fade Enhancement Pattern": ["AP", "PVP", "DP"],
     "Nodule-in-Nodule Architecture": ["AP", "PVP", "DP"],
     "Peripheral Washout": ["AP", "PVP", "DP"],
@@ -63,10 +65,24 @@ FEATURE_DEFINITIONS = [
         ]
     },
     {
+        "name": "Peritumoral Hypodense Halo",
+        "options": [
+            'A peritumoral hypodense halo is absent; the interface between the lesion and the periphery is sharp, without an intervening dark, shadowy ring.',
+            'A peritumoral hypodense halo is present, seen as a distinct, dark (hypodense) shadowy ring or zone immediately outside the lesion\'s border.'
+        ]
+    },
+    {
         "name": "Corona Enhancement",
         "options": [
             'No radiating vascular pattern is seen at the tumor periphery in any phase.',
             'A dynamic "corona enhancement" is identified: a radiating vascular pattern appears at the tumor periphery in the late AP or PVP and fades in later phases.'
+        ]
+    },
+    {
+        "name": "Custom TTPVI Feature",
+        "options": [
+            'The combined pattern is ABSENT. This condition is met if the AP analysis fails to show distinct intratumoral arteries, OR if the PVP/DP analysis reveals the presence of a peritumoral hypodense halo.',
+            'The combined pattern is PRESENT. This requires a two-step confirmation: 1) The AP analysis must show distinct, dot-like or linear hyper-enhancing structures (intratumoral arteries) inside the lesion, AND 2) The PVP/DP analysis must confirm the absence of a peritumoral hypodense halo.'
         ]
     },
     {
@@ -498,7 +514,7 @@ def run_phase_2(reports_from_phase1):
     You are a senior radiologist acting as a **cross-phase analysis specialist** within an AI diagnostic committee.
     Your input consists of three **partial, phase-specific reports** from AI analysts (AP, DP, PVP). A report for a given phase will only contain findings for features observable in that phase. 
 
-    Your task is to **synthesize these partial reports to create a complete evolutionary summary for all 7 features**.
+    Your task is to **synthesize these partial reports to create a complete evolutionary summary for all 9 features**.
     For any given feature, you may only have input from one, two, or all three reports; this is expected. You must deduce the overall evolution based on the available information. For example, to determine "Peritumoral Perfusion Alteration", you should primarily rely on the AP and PVP reports. 
 
     **IMPORTANT: Do not include any headers, titles, salutations, or conversational text like 'To:', 'From:', or 'Subject:'.**
@@ -637,7 +653,7 @@ You are the **Chief Radiologist** presiding over an AI diagnostic committee. You
 **Your Reasoning Process:**
 Your primary job is to synthesize three expert perspectives to form a final, reasoned conclusion. Based on testing, the text-based analysis (reports 1 & 2) has been found to be more consistently reliable. Therefore, you must follow this **Conflict Resolution Protocol**:
 
-1.  **Establish Primary Finding from Text:** First, for each of the 7 features, establish a "primary finding" by synthesizing the **Feature Evolution Report** and the **Diagnostic Snapshot Report** (reports 1 & 2). This text-based conclusion is your baseline.
+1.  **Establish Primary Finding from Text:** First, for each of the 9 features, establish a "primary finding" by synthesizing the **Feature Evolution Report** and the **Diagnostic Snapshot Report** (reports 1 & 2). This text-based conclusion is your baseline.
 
 2.  **Use Visual Report for Verification:** Next, use the **Visual Adjudicator Report** (report 3) to either **confirm** or **challenge** this primary finding.
 
@@ -664,14 +680,16 @@ Your final output MUST be a single block of text that strictly follows the three
 
 3.  **Structured Summary:**
     This section MUST be a single, valid JSON object and nothing else. Do not add any introductory text, markdown tags like ```json, or any text after the JSON object.
-    The JSON object must summarize the final answer for each of the 7 features. It must have keys from "pattern_1" to "pattern_7", corresponding to the features in this order:
+    The JSON object must summarize the final answer for each of the 9 features. It must have keys from "pattern_1" to "pattern_9", corresponding to the features in this order:
     1. Enhancing Capsule
     2. Peritumoral Perfusion Alteration
-    3. Corona Enhancement
-    4. Fade Enhancement Pattern
-    5. Nodule-in-Nodule Architecture
-    6. Peripheral Washout
-    7. Delayed Central Enhancement
+    3. Peritumoral Hypodense Halo
+    4. Corona Enhancement
+    5. Custom TTPVI Feature
+    6. Fade Enhancement Pattern
+    7. Nodule-in-Nodule Architecture
+    8. Peripheral Washout
+    9. Delayed Central Enhancement
 
     For each pattern, the value must be an object with two keys:
     - "answer": The final binary conclusion (0 for first description, 1 for second description).
@@ -690,7 +708,7 @@ Example of the required structure for the JSON part ONLY:
         "answer": 0,
         "justification": "No transient, wedge-shaped hyperenhancement was observed; any minor surrounding brightness in the AP persisted into the PVP."
     }},
-    "pattern_5": {{
+    "pattern_7": {{
         "answer": 0,
         "justification": "The lesion's internal enhancement was reported as homogeneous across all three phases, lacking a distinct inner nodule."
     }}
@@ -824,7 +842,7 @@ def main():
 
 
     # 将所有病人的结果保存到一个JSON文件中
-    output_filename = "multi_agent_results.json"
+    output_filename = "multi_agent_3_results.json"
     with open(output_filename, 'w', encoding='utf-8') as f:
         json.dump(all_patient_results, f, ensure_ascii=False, indent=4)
     
