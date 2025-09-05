@@ -36,85 +36,84 @@ BASE_DATA_PATH = "/home/yxcui/FM-Bridge/testing_file/test_dataset/cropped_30_sli
 
 # 规则：定义每个特征最终诊断所必需的期相
 FEATURE_PHASE_REQUIREMENTS = {
-    "Enhancing Capsule": ["AP", "PVP", "DP"],
-    "Peritumoral Perfusion Alteration": ["AP", "PVP"],
-    "Peritumoral Hypodense Halo": ["PVP", "DP"],  
-    "Corona Enhancement": ["AP", "PVP", "DP"],
-    "Custom TTPVI Feature": ["AP", "PVP", "DP"],
-    "Fade Enhancement Pattern": ["AP", "PVP", "DP"],
-    "Nodule-in-Nodule Architecture": ["AP", "PVP", "DP"],
-    "Peripheral Washout": ["AP", "PVP", "DP"],
-    "Delayed Central Enhancement": ["AP", "DP"]
+    "Enhancing Capsule": ["AP", "PVP", "DP"], # 44
+    "Peritumoral Perfusion Alteration": ["AP", "PVP"], # 53
+    "Peritumoral Hypodense Halo": ["PVP", "DP"], # 59
+    "Corona Enhancement": ["AP", "PVP", "DP"], # 60
+    "Custom TTPVI Feature": ["AP", "PVP", "DP"], # 62 
+    "Fade Enhancement Pattern": ["AP", "PVP", "DP"], # 65
+    "Nodule-in-Nodule Architecture": ["AP", "PVP", "DP"], # 66
+    "Peripheral Washout": ["AP", "PVP", "DP"], # 68
+    "Delayed Central Enhancement": ["AP", "DP"] # 70
 }
 
 # --- 临床问题定义 (Clinical Question Definitions) ---
 # 将问题列表定义为全局常量，供所有Agent访问
 FEATURE_DEFINITIONS = [
     {
-        "name": "Enhancing Capsule",
+        "name": "Enhancing Capsule", # 44
         "options": [
             'A distinct, hyper-enhancing rim is NOT identified in the PVP/DP, or any visible rim does not show clear enhancement compared to the AP.',
             'By comparing phases, a smooth rim is identified that enhances to become distinctly hyper-enhancing in the PVP or DP.'
         ]
     },
     {
-        "name": "Peritumoral Perfusion Alteration",
+        "name": "Peritumoral Perfusion Alteration", # 53
         "options": [
             'No clear perfusion anomalies are seen in the AP, or any observed hyperenhancement around the lesion persists into the PVP.',
             'A transient perfusion anomaly is confirmed: wedge-shaped or halo-like hyperenhancement is visible around the lesion in the AP and resolves (disappears) in the PVP.'
         ]
     },
     {
-        "name": "Peritumoral Hypodense Halo",
+        "name": "Peritumoral Hypodense Halo", # 59
         "options": [
-            'A peritumoral hypodense halo is absent; the interface between the lesion and the periphery is sharp, without an intervening dark, shadowy ring.',
-            'A peritumoral hypodense halo is present, seen as a distinct, dark (hypodense) shadowy ring or zone immediately outside the lesion\'s border.'
+            'In the PVP or DP, the interface between the lesion and the surrounding liver parenchyma is direct, without a distinct, dark, intervening ring.',
+            'In the PVP or DP, a distinct, dark (hypodense), well-defined ring is visible immediately surrounding the exterior of the lesion. This "halo" is darker than both the lesion\'s periphery and the adjacent liver tissue.'
         ]
     },
     {
-        "name": "Corona Enhancement",
+        "name": "Corona Enhancement", # 60
         "options": [
             'No radiating vascular pattern is seen at the tumor periphery in any phase.',
             'A dynamic "corona enhancement" is identified: a radiating vascular pattern appears at the tumor periphery in the late AP or PVP and fades in later phases.'
         ]
     },
     {
-        "name": "Custom TTPVI Feature",
+        "name": "Custom TTPVI Feature", # 62
         "options": [
             'The combined pattern is ABSENT. This condition is met if the AP analysis fails to show distinct intratumoral arteries, OR if the PVP/DP analysis reveals the presence of a peritumoral hypodense halo.',
             'The combined pattern is PRESENT. This requires a two-step confirmation: 1) The AP analysis must show distinct, dot-like or linear hyper-enhancing structures (intratumoral arteries) inside the lesion, AND 2) The PVP/DP analysis must confirm the absence of a peritumoral hypodense halo.'
         ]
     },
     {
-        "name": "Fade Enhancement Pattern",
+        "name": "Fade Enhancement Pattern", # 65
         "options": [
             'Comparing phases, the lesion becomes hypodense relative to surrounding liver in the PVP or DP, demonstrating a "washout" pattern.',
             'Comparing phases, the lesion enhancement persists, remaining iso- or hyper-enhancing relative to surrounding liver in the PVP or DP, demonstrating a "fade" (non-washout) pattern.'
         ]
     },
     {
-        "name": "Nodule-in-Nodule Architecture",
+        "name": "Nodule-in-Nodule Architecture", # 66
         "options": [
             'Across all phases, the lesion\'s internal enhancement is either homogeneous or chaotically heterogeneous, lacking a clear, stable hierarchical structure.',
             'A "nodule-in-nodule" architecture is confirmed across phases: a smaller nodule shows more intense AP enhancement than the larger parent lesion, and this distinction often persists in later phases.'
         ]
     },
     {
-        "name": "Peripheral Washout",
+        "name": "Peripheral Washout", # 68
         "options": [
             'After initial AP enhancement, the lesion either does not show washout or shows a non-peripheral (diffuse) washout pattern in the PVP/DP.',
             'After initial AP enhancement, the lesion shows a distinct "peripheral washout" pattern, with only its rim becoming hypoenhancing in the PVP/DP.'
         ]
     },
     {
-        "name": "Delayed Central Enhancement",
+        "name": "Delayed Central Enhancement", # 70
         "options": [
             'Comparing phases, the central part of the lesion does not show progressive enhancement (e.g., it washes out or remains persistently non-enhancing).',
             'Comparing phases, the central part of the lesion shows progressive, sustained enhancement, becoming brighter in the delayed phase than it was in the AP.'
         ]
     }
 ]
-
 
 
 # --- 2. 辅助函数 (Helper Functions) ---
@@ -842,7 +841,7 @@ def main():
 
 
     # 将所有病人的结果保存到一个JSON文件中
-    output_filename = "multi_agent_3_results.json"
+    output_filename = "multi_agent_external_results.json"
     with open(output_filename, 'w', encoding='utf-8') as f:
         json.dump(all_patient_results, f, ensure_ascii=False, indent=4)
     
