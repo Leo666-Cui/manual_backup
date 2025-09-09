@@ -9,7 +9,7 @@ import google.auth.transport.requests
 from google.oauth2 import service_account
 import re
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple
 
 
@@ -384,10 +384,6 @@ def select_paths_by_numbers(
     return selected_paths_ap, selected_paths_dp, selected_paths_pvp
 
 
-
-
-
-
 # 分析3个时期的agent
 def run_phase_1(image_paths_ap, image_paths_dp, image_paths_pvp):
     cprint("\n--- [Phase 1: Parallel Feature Extraction with Professional Questions] ---", 'yellow', attrs=['bold'])
@@ -495,11 +491,12 @@ Your JSON output must follow this exact structure:
                 cprint(f"  Error: Failed to parse JSON for slice {slice_number} (Phase {phase}). Response:\n{response_text}", 'red')
                 all_reports[phase].append({"error": "Failed to parse", "slice": slice_number, "raw_response": response_text})
 
-    print(f"phase_1 output: {all_reports}")
+    print("phase_1 output")
+    print(json.dumps(all_reports, indent=2, ensure_ascii=False))
     return all_reports
 
 
-# 
+
 def run_phase_2(phase1_reports, selected_slice_numbers):
     """
     第二阶段 (左分支): 跨期相文本整合。
@@ -514,7 +511,6 @@ def run_phase_2(phase1_reports, selected_slice_numbers):
     You are a senior radiologist acting as a **cross-phase synthesis specialist**.
     Your task is to synthesize three phase-specific reports (AP, DP, PVP) that all describe the **same single anatomical slice**.
     Your goal is to create one cohesive, text-based analysis report that summarizes the lesion's complete dynamic behavior on this specific slice.
-    Highlight the evolution of features, any inconsistencies, and the overall pattern observed.
     Your output should be a concise, analytical paragraph.
     """
     agent_4 = Agent(instruction=text_synthesis_instruction, role="Text Synthesis Analyst")
@@ -541,8 +537,15 @@ def run_phase_2(phase1_reports, selected_slice_numbers):
 
             # 5. 构建专属的、关于当前切片的Prompt
             task_prompt = f"""
-            Please synthesize the following three reports for **slice number {slice_num}** into a single, comprehensive text analysis.
+            Please synthesize the following three reports for **slice number {slice_num}**.
+            For any given feature, you may only have input from one, two, or all three reports; this is expected. You must deduce the overall evolution based on the available information. For example, to determine "Peritumoral Perfusion Alteration", you should primarily rely on the AP and PVP reports. 
+            
+            **YOUR PRIMARY TASK:**
+            Create a definitive summary for ALL 9 of the following radiological features**. You must address each feature one by one, synthesizing the findings from the provided reports to determine the overall conclusion for this slice.
 
+            **YOUR ROLE:**
+            Your role is to **accurately consolidate the provided information. Do not introduce new visual findings that are not in the reports. Your goal is to create a unified text summary for each feature.
+            
             [Report from phase AP for slice {slice_num}]:
             {json.dumps(report_ap.get('findings', []), indent=2, ensure_ascii=False)}
 
@@ -552,9 +555,19 @@ def run_phase_2(phase1_reports, selected_slice_numbers):
             [Report from phase PVP for slice {slice_num}]:
             {json.dumps(report_pvp.get('findings', []), indent=2, ensure_ascii=False)}
 
-            Your output should be a single, analytical paragraph summarizing your findings for this slice.
+            **REQUIRED OUTPUT FORMAT:**
+            Your output MUST be a point-by-point summary. Use the exact feature names as headings. Do not use a single narrative paragraph.
+
+            ---
+            **REQUIRED OUTPUT FORMAT EXAMPLE:**
+            **Enhancing Capsule:** [Your synthesized finding for this feature, e.g., "Absent in the AP report, but described as a clear, smooth capsule in both the PVP and DP reports, confirming its presence."]
+            **Peritumoral Perfusion Alteration:** [Your synthesized finding for this feature, e.g., "The AP report noted a transient hyperenhancement that was confirmed to resolve in the PVP report, indicating the feature is present."]
+            **Peritumoral Hypodense Halo:** [Your synthesized finding for this feature...]
+            ---
+
+            Now, generate the complete, point-by-point summary for all 9 features for slice #{slice_num}.
             """
-            
+            # print(f"long agent input for slice {slice_num}: {task_prompt}")
             # 6. 提交并行任务
             future = executor.submit(agent_4.chat, prompt_text=task_prompt)
             future_to_slice[future] = slice_num
@@ -577,12 +590,13 @@ def run_phase_2(phase1_reports, selected_slice_numbers):
     return synthesized_reports_by_slice
 
 
+
+
+
 # ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-def _analyze_single_slice_level_visual(agent, slice_num, focus_image_paths):
-    """
-    【修正版】辅助函数：对单一解剖层面对应的3张期相图片进行详细视觉分析。
-    """
-    
+# 视觉分析师，在run_phase_3中使用
+def _analyze_single_slice_visual_window(agent_visual, slice_num, images_for_window, prev_slice_num, next_slice_num):
+    #【升级版】辅助函数：在一个“视觉窗口”内，对中心切片进行分析。
     # 动态构建问题列表 (这部分逻辑不变)
     prompt_sections = []
     for i, feature in enumerate(FEATURE_DEFINITIONS):
@@ -591,94 +605,136 @@ def _analyze_single_slice_level_visual(agent, slice_num, focus_image_paths):
 Answer 0 (Absent): "{feature['options'][0]}"
 Answer 1 (Present): "{feature['options'][1]}"
 """)
+    # 1. 构建一个详细的、带编号的图片清单字符串
+    image_context_parts = []
+    focus_start_index = 1
+    if prev_slice_num is not None:
+        image_context_parts.append(f"- **Context (Neighbor #{prev_slice_num}):** Images 1-3 (AP, DP, PVP)")
+        focus_start_index = 4
+    if next_slice_num is not None:
+        context_next_start_index = focus_start_index + 3
+        image_context_parts.append(f"- **Context (Neighbor #{next_slice_num}):** Images {context_next_start_index}-{context_next_start_index+2} (AP, DP, PVP)")
 
-    # 【修正版】Prompt现在只关注这3张核心图片
-    fine_grained_visual_prompt = f"""
-You are an expert radiologist, the **Visual Adjudicator** for an AI committee. Your task is to perform a fine-grained analysis of a **single anatomical slice level** across its three contrast phases.
+    # This line always comes first
+    image_context_parts.insert(0, f"- **Primary Focus (Slice #{slice_num}):** Images {focus_start_index}-{focus_start_index+2} (AP, DP, PVP)")
 
-**IMAGE CONTEXT:**
-You have been provided with **3 CT images** corresponding to slice number **{slice_num}**:
-- Image 1: Arterial Phase (AP)
-- Image 2: Delayed Phase (DP)
-- Image 3: Portal Venous Phase (PVP)
+    image_context_str = "\n".join(image_context_parts)
+    # print(f"告诉agent图片的顺序: \n{image_context_str}")
 
-**YOUR TASK:**
-Synthesize the visual information for slice **{slice_num}**. For each of the {len(FEATURE_DEFINITIONS)} features, choose the most accurate description (0 or 1), provide a confidence score (1-5), and a justification. Your justification MUST be based on direct, multi-phase visual evidence from the provided images for this slice level.
+    # 构建新的、完全动态的Prompt
+    visual_window_prompt = f"""
+You are an expert radiologist, the **Visual Adjudicator** for an AI committee. Your judgment is final as it is based on direct visual evidence.
+
+### INPUT OVERVIEW
+You have been provided with a "visual window" of {len(images_for_window)} CT images to analyze.
+Here is the manifest detailing each image you have received:
+{image_context_str}
+
+### PRIMARY OBJECTIVE
+Your goal is to produce a detailed, fine-grained analysis report for the **single central slice** within this window, which is **slice number {slice_num}**. You will use the adjacent slices as 3D context.
+
+### STEP-BY-STEP INSTRUCTIONS
+1.  **Build 3D Context:** First, review all provided images using the manifest to form a three-dimensional understanding of the lesion's structure.
+2.  **Focus on the Central Slice:** Now, focus your primary analysis on the 3 phase images (AP, DP, PVP) for **slice #{slice_num}**.
+3.  **Answer All Questions:** For each of the {len(FEATURE_DEFINITIONS)} features listed below, you must:
+    a. Choose the most accurate description (0 or 1) for slice #{slice_num}.
+    b. Provide a confidence score (1-5).
+    c. Write a justification. Your justification **must** primarily describe the findings on slice #{slice_num}, but **should also** state whether these findings are consistent with the adjacent slices (your 3D context).
+4.  **Format the Output:** Construct a SINGLE, VALID JSON object as described below.
+
+### QUESTIONS TO ANSWER for Slice #{slice_num}
+{''.join(prompt_sections)}
+
+### REQUIRED OUTPUT FORMAT & EXAMPLE
+Your final output MUST be a SINGLE, VALID JSON object and nothing else. It must have a single root key "slice_findings", which contains a list of {len(FEATURE_DEFINITIONS)} objects. Before you output, double-check that your JSON is perfectly formatted.
 
 **FEW-SHOT EXAMPLES:**
 Here are examples of the high-quality, evidence-based reasoning required:
+```json
 {{
-    "pattern_1": {{
-        "answer": 1,
-        "confidence": 5,
-        "justification": "On slice #{slice_num}, review of the Delayed Phase (DP) sequence (images 6-10) reveals a distinct and smooth hyper-enhancing rim completely encircling the lesion, which was not visible in the Arterial Phase. This feature is consistent with the adjacent slices."
-    }},
-    "pattern_2": {{
-        "answer": 0,
-        "confidence": 4,
-        "justification": "On slice #{slice_num}, review of the Arterial Phase (AP) sequence (images 1-5) shows homogeneous enhancement in the liver parenchyma surrounding the lesion, with no evidence of the characteristic wedge-shaped or halo-like hyperenhancement, and this observation is consistent with the adjacent slices."
-    }}
+    "slice_findings": [
+        {{
+            "feature_1": "Enhancing Capsule",
+            "answer": 1,
+            "confidence": 5,
+            "justification": "On slice #{slice_num}, review of the Delayed Phase (DP) sequence (images 6-10) reveals a distinct and smooth hyper-enhancing rim completely encircling the lesion, which was not visible in the Arterial Phase. This feature is consistent with the adjacent slices."
+        }},
+        {{
+            "feature_2": "Peritumoral Perfusion Alteration",
+            "answer": 0,
+            "confidence": 4,
+            "justification": "On slice #{slice_num}, review of the Arterial Phase (AP) sequence (images 1-5) shows homogeneous enhancement in the liver parenchyma surrounding the lesion, with no evidence of the characteristic wedge-shaped or halo-like hyperenhancement, and this observation is consistent with the adjacent slices."
+        }}
+    ]
 }}
-
-**QUESTIONS TO ANSWER for Slice #{slice_num}:**
-{''.join(prompt_sections)}
-
-**REQUIRED OUTPUT FORMAT:**
-Your output MUST be a SINGLE, VALID JSON object for this slice. It should contain a list of {len(FEATURE_DEFINITIONS)} findings.
-Example: {{ "slice_findings": [...] }}
 """
     
     # 【【核心修正】】
     # 工人函数现在只将【3张焦点图片】的路径传递给API
-    response_text = agent.chat(prompt_text=fine_grained_visual_prompt, image_paths=focus_image_paths)
+    response_text = agent_visual.chat(prompt_text=visual_window_prompt, image_paths=images_for_window)
     
     try:
         clean_json_text = response_text.strip().replace("```json", "").replace("```", "")
         return json.loads(clean_json_text)
     except (json.JSONDecodeError, AttributeError):
         return {"error": "Failed to parse JSON", "raw_response": response_text, "slice_number": slice_num}
-    
 
-def run_phase_visual(selected_ap, selected_dp, selected_pvp, selected_numbers):
-    cprint("\n--- [Visual Adjudicator: Fine-grained, Per-Slice Analysis (Parallel)] ---", 'yellow', attrs=['bold'])
+def run_phase_3(selected_ap, selected_dp, selected_pvp, selected_numbers):
+    cprint("\n--- [Visual Adjudicator: Fine-grained Analysis with Visual Window (Parallel)] ---", 'yellow', attrs=['bold'])
 
+    # ... (Agent初始化和path_map构建部分保持不变) ...
     visual_adjudicator_instruction = "You are an expert radiologist, the Visual Adjudicator for an AI committee. Provide a detailed report for one specific slice at a time based on its 3-phase images. Follow all instructions in the user prompt precisely."
     agent_5 = Agent(instruction=visual_adjudicator_instruction, role="Visual Adjudicator")
+    ap_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_ap}
+    dp_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_dp}
+    pvp_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_pvp}
     
     final_visual_reports = {}
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_slice = {}
         
-        ap_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_ap}
-        dp_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_dp}
-        pvp_map = {int(re.search(r'(\d+)\.png$', p).group(1)): p for p in selected_pvp}
+        # 排序以确保索引的正确性
+        sorted_selected_numbers = sorted(selected_numbers)
 
-        cprint(f"Submitting {len(selected_numbers)} fine-grained visual analysis tasks to be run in parallel...", 'magenta')
-        for slice_num in selected_numbers:
-            # 为当前切片号，明确地收集其对应的3张焦点图片
-            focus_images_for_level = [ap_map.get(slice_num), dp_map.get(slice_num), pvp_map.get(slice_num)]
+        for i, slice_num in enumerate(sorted_selected_numbers):
             
-            if all(focus_images_for_level):
-                # 【【核心修正】】
-                # “经理”现在将正确的参数（3张焦点图片）委托给“工人”函数
-                future = executor.submit(
-                    _analyze_single_slice_level_visual, 
-                    agent_5, 
-                    slice_num, 
-                    focus_images_for_level # <-- 现在正确地传递了3张焦点图片
-                )
-                future_to_slice[future] = slice_num
+            # 【【核心逻辑】】确定邻居切片的号码
+            prev_slice_num = sorted_selected_numbers[i-1] if i > 0 else None
+            next_slice_num = sorted_selected_numbers[i+1] if i < len(sorted_selected_numbers) - 1 else None
 
-        # ... (后续的tqdm和结果收集逻辑不变) ...
+            # 收集当前切片和其邻居的图片 (这个逻辑是正确的)
+            images_for_window = []
+            for num in [prev_slice_num, slice_num, next_slice_num]: # 哪3个slice
+                if num is not None:
+                    images_for_window.extend([ap_map.get(num), dp_map.get(num), pvp_map.get(num)])
+            images_for_window = [p for p in images_for_window if p is not None] # 最后只有一个list
+
+            if len(images_for_window) < 3:
+                continue
+
+            # 【【核心修改】】将邻居信息也一并提交给“工人”
+            future = executor.submit(
+                _analyze_single_slice_visual_window, 
+                agent_5, 
+                slice_num, 
+                images_for_window, # 一个list包含2或3个切片的3个时期图像(6或9张图片)
+                prev_slice_num, # 前一张CT图的号码
+                next_slice_num  # 后一张CT图的号码
+            )
+            future_to_slice[future] = slice_num
+
         for future in tqdm(as_completed(future_to_slice), total=len(future_to_slice), desc="Adjudicating Slices"):
             slice_num = future_to_slice[future]
             result = future.result()
             final_visual_reports[slice_num] = result
+
+        final_visual_reports = dict(sorted(final_visual_reports.items(), key=lambda item: int(item[0])))
+
             
     cprint("\n--- Fine-Grained Visual Adjudicator Output (by Slice) ---", 'green')
     print(json.dumps(final_visual_reports, indent=2, ensure_ascii=False))
-    
+
     return final_visual_reports
 # ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 
@@ -686,105 +742,27 @@ def run_phase_visual(selected_ap, selected_dp, selected_pvp, selected_numbers):
 
 
 
-
-
-def run_phase_3(longitudinal_report, cross_sectional_report, visual_adjudicator_report):
+# ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+# chief
+# 负责输入单个切片给agent的函数，在run_phase_4中使用
+def _adjudicate_single_slice(agent_6, slice_num, text_report, visual_report):
     """
-    执行第三阶段：运行首席整合官，综合所有分析报告。
+    对单一解剖层面，综合其文本和视觉报告，做出最终裁决。
+    它接收的已经是干净的Python对象。
     """
+    
     cprint("👨‍⚕️ [Phase 3: Final Decision Making] 👨‍⚕️", 'cyan', attrs=['bold'])
     
     # 准备给首席整合官的输入，现在包含三份报告
     synthesis_input = f"""
     [Feature Evolution Report from Cross-Phase Analyst]:
-    {longitudinal_report}
-    [Diagnostic Snapshot Report from Pattern Recognition Analyst]:
-    {cross_sectional_report}
+    {text_report}
     [Visual Adjudicator Report from Direct Image Analysis]:
-    {visual_adjudicator_report}
+    {visual_report}
     """
-    cprint("\n[6. Chief Synthesizer] Synthesizing all three expert reports...", 'magenta')
-
-    # Agent 5: 首席整合官
-    chief_synthesizer_prompt = f"""
-You are the **Chief Radiologist** presiding over an AI diagnostic committee. Your task is to provide the final, global conclusion by synthesizing three expert reports.
-
-**Your Inputs:**
-1.  A **Feature Evolution Report** from the Cross-Phase Analyst (summarizing text-based findings over time).
-2.  A **Diagnostic Snapshot Report** from the Pattern Recognition Analyst (summarizing text-based findings by phase).
-3.  A **Visual Adjudicator Report** (based on direct analysis of all images, with confidence scores).
-
-**Your Reasoning Process:**
-Your primary job is to synthesize three expert perspectives to form a final, reasoned conclusion. Based on testing, the text-based analysis (reports 1 & 2) has been found to be more consistently reliable. Therefore, you must follow this **Conflict Resolution Protocol**:
-
-1.  **Establish Primary Finding from Text:** First, for each of the 9 features, establish a "primary finding" by synthesizing the **Feature Evolution Report** and the **Diagnostic Snapshot Report** (reports 1 & 2). This text-based conclusion is your baseline.
-
-2.  **Use Visual Report for Verification:** Next, use the **Visual Adjudicator Report** (report 3) to either **confirm** or **challenge** this primary finding.
-
-3.  **Handle Agreement and Conflict:**
-    * **If they AGREE:** The finding is confirmed with high confidence. Your justification should reflect this consensus.
-    * **If they CONFLICT:** This indicates a significant discrepancy. You must handle it with caution:
-        * **Default Stance:** Your default decision should be to **trust the primary finding from the text-based analysis (reports 1 & 2)**.
-        * **Condition for Override:** You may only override the text-based finding and adopt the Visual Adjudicator's conclusion if, and only if, the Visual Adjudicator's report meets **BOTH** of these strict criteria:
-            a) Its confidence score is the **maximum possible (e.g., 5/5)**.
-            b) Its justification provides **exceptionally clear, unambiguous, and compelling evidence**, citing specific image numbers.
-        * If the override condition is not met, you stick with the text-based finding.
-
-4.  **Justify Your Final Decision:** In your final `justification` for each feature, you must be transparent about the process:
-    * If the reports agreed, state the consensus. (e.g., *"Confirmed by both text-based analysis and direct visual review."*)
-    * If there was a conflict that you resolved, explain your decision. (e.g., *"While the Visual Adjudicator reported a possible finding, the text-based analysis from all initial phase-analysts was consistently negative. Defaulting to the more reliable text-based consensus."* or *"Overriding the text-based analysis due to a definitive, max-confidence (5/5) visual findin
-
-Your final output MUST be a single block of text that strictly follows the three-part structure outlined below. It is CRITICAL that you include the exact headings for each section, including the numbering.
-**Required Output Format:**
-1.  **Core Conclusion:** 
-    A concise paragraph summarizing the overall clinical findings and conclusion.
-
-2.  **Main Evidence:**
-    A bulleted points detailing the key evidence from both the longitudinal, cross-sectional and visual reports that support your core conclusion.
-
-3.  **Structured Summary:**
-    This section MUST be a single, valid JSON object and nothing else. Do not add any introductory text, markdown tags like ```json, or any text after the JSON object.
-    The JSON object must summarize the final answer for each of the 9 features. It must have keys from "pattern_1" to "pattern_9", corresponding to the features in this order:
-    1. Enhancing Capsule
-    2. Peritumoral Perfusion Alteration
-    3. Peritumoral Hypodense Halo
-    4. Corona Enhancement
-    5. Custom TTPVI Feature
-    6. Fade Enhancement Pattern
-    7. Nodule-in-Nodule Architecture
-    8. Peripheral Washout
-    9. Delayed Central Enhancement
-
-    For each pattern, the value must be an object with two keys:
-    - "answer": The final binary conclusion (0 for first description, 1 for second description).
-    - "justification": A brief, concise summary of the reasoning.
-
-**Before generating the final output, double-check that the JSON syntax is perfect, especially for **Structured Summary:**, ensuring that a comma (`,`) separates every pattern object from the next.**
-
-Example of the required structure for the JSON part ONLY:
-```json
-{{
-    "pattern_1": {{
-        "answer": 1,
-        "justification": "Visible as a distinct, enhancing rim in the PVP/DP, which was not clearly defined in the AP."
-    }},
-    "pattern_2": {{
-        "answer": 0,
-        "justification": "No transient, wedge-shaped hyperenhancement was observed; any minor surrounding brightness in the AP persisted into the PVP."
-    }},
-    "pattern_7": {{
-        "answer": 0,
-        "justification": "The lesion's internal enhancement was reported as homogeneous across all three phases, lacking a distinct inner nodule."
-    }}
-}}
-"""
-
-    agent_6 = Agent(instruction=chief_synthesizer_prompt, role="Chief Synthesizer")
+    cprint("\n[6. Chief Synthesizer] Synthesizing all two expert reports...", 'magenta')
     final_hybrid_output = agent_6.chat(prompt_text=synthesis_input)
-    # print(f"agent_6 output: \n{final_hybrid_output}")
 
-
-    # 【【新】】增加解析逻辑，分离文本报告和JSON对象
     prose_report = ""
 
     try:
@@ -821,40 +799,133 @@ Example of the required structure for the JSON part ONLY:
         cprint(f"An unexpected error occurred during parsing: {e}", "red")
         prose_report = final_hybrid_output
         structured_summary = {"error": f"An unexpected error occurred. Details: {e}", "raw_response": final_hybrid_output}
-
-    # --- 打印最终结果 ---
-    print("\n" + "="*20 + " 分割结果 " + "="*20)
-
-    print("\n--- 第一部分：文本报告 (Prose Report) ---")
-    print(prose_report)
-
-    print("\n--- 第二部分：结构化总结 (Structured Summary JSON) ---")
-    # 使用json.dumps美化打印输出，方便查看
-    print(json.dumps(structured_summary, indent=4, ensure_ascii=False))
-
-    # 返回两个部分：文本报告和结构化字典
+    
     return prose_report, structured_summary
+
+
+# 负责定义agent以及agent的并行调度（每个agent都是独立处理单个切片）
+def run_phase_4(text_reports_by_slice, visual_reports_by_slice, selected_slice_numbers):
+    """
+    【经理函数】执行第三阶段：并行地为每个切片运行首席整合官。
+    """
+    cprint("\n" + "="*60, 'cyan')
+    cprint("👨‍⚕️ [Phase 3: Final Per-Slice Adjudication (Parallel)] 👨‍⚕️", 'cyan', attrs=['bold'])
+    cprint("="*60, 'cyan')
+
+    # ... (Agent初始化部分不变) ...
+    # Agent 5: 首席整合官
+    chief_synthesizer_prompt = f"""
+You are the **Chief Radiologist** presiding over an AI diagnostic committee. Your task is to provide the final, global conclusion by synthesizing two expert reports.
+
+**Your Inputs:**
+1.  A **Feature Evolution Report** from the Cross-Phase Analyst (summarizing text-based findings over time).
+2.  A **Visual Adjudicator Report** (based on direct analysis of all images, with confidence scores).
+
+**Your Reasoning Process:**
+Your primary job is to synthesize two expert perspectives to form a final, reasoned conclusion. The two reports—one from the text-based analysis and one from the direct visual analysis—should be considered **equally important sources of evidence**. You must follow this **Balanced Adjudication Protocol**:
+
+1.  **Identify Discrepancies:** For each of the features, first identify if there is a disagreement between the conclusion from the text-based analysis and the direct visual analysis.
+
+2.  **Handle Agreement:** If the two reports agree, the finding is confirmed. Your justification should reflect this strong consensus.
+
+3.  **Handle Conflict (Balanced Weighing):** If the reports disagree, you must act as an impartial judge. Do not automatically favor one report over the other. Instead, you must weigh the evidence from both sides:
+    * **Compare Confidence:** Evaluate the confidence score provided by the Visual Adjudicator. How does it compare to the implied confidence of the text-based report (e.g., was it a strong consensus among the initial analysts)?
+    * **Compare Justification:** Critically read the justification and evidence from **both** reports. Which one provides more specific, compelling, and clinically sound reasoning? Does the visual report cite clear, unambiguous image features? Does the text-based report point to a consistent finding across multiple initial analyses?
+
+4.  **Make a Weighed Decision & Justify:** Based on your evaluation, your final answer should reflect the finding with the **stronger overall evidence**, considering both confidence and the quality of the justification. In your final `justification` for that feature, you MUST explain how you resolved the conflict.
+    * If the reports agreed, state the consensus. (e.g., *"Confirmed by both text-based analysis and direct visual review."*)
+    * If there was a conflict that you resolved, explain your decision.
+
+Your final output MUST be a single block of text that strictly follows the three-part structure outlined below. It is CRITICAL that you include the exact headings for each section, including the numbering.
+
+**Required Output Format:**
+1.  **Core Conclusion:** 
+    A concise paragraph summarizing the overall clinical findings and conclusion.
+
+2.  **Main Evidence:**
+    A bulleted points detailing the key evidence from both the longitudinal and visual reports that support your core conclusion.
+
+3.  **Structured Summary:**
+    This section MUST be a single, valid JSON object and nothing else. Do not add any introductory text, markdown tags like ```json, or any text after the JSON object.
+    The JSON object must summarize the final answer for each of the 9 features. It must have keys from "pattern_1" to "pattern_9", corresponding to the features in this order:
+    1. Enhancing Capsule
+    2. Peritumoral Perfusion Alteration
+    3. Peritumoral Hypodense Halo
+    4. Corona Enhancement
+    5. Custom TTPVI Feature
+    6. Fade Enhancement Pattern
+    7. Nodule-in-Nodule Architecture
+    8. Peripheral Washout
+    9. Delayed Central Enhancement
+
+    For each pattern, the value must be an object with two keys:
+    - "answer": The final binary conclusion (0 for first description, 1 for second description).
+    - "justification": A brief, concise summary of the reasoning.
+
+**Before generating the final output, double-check that the JSON syntax is perfect, especially for **Structured Summary:**, ensuring that a comma (`,`) separates every pattern object from the next.**
+
+Example of the required structure for the JSON part ONLY:
+```json
+{{
+    "pattern_1": {{
+        "answer": 1,
+        "justification": "The text-based analysis from cross-phase reports consistently identified a thick, enhancing capsule in the portal venous phase. This consensus is upheld over a conflicting visual report that did not meet the criteria for an override."
+    }},
+    "pattern_2": {{
+        "answer": 0,
+        "justification": "Overriding the inferential text-based finding. The Visual Adjudicator reported with maximum confidence (5/5) that this feature is non-assessable due to the surrounding liver parenchyma not being visible in the images."
+    }},
+    "pattern_7": {{
+        "answer": 0,
+        "justification": "Consensus across all reports. The lesion's internal enhancement was described as chaotic and heterogeneous, lacking a nodule-in-nodule appearance."
+    }}
+}}
+"""
+
+    agent_6 = Agent(instruction=chief_synthesizer_prompt, role="Chief Synthesizer")
+    final_adjudicated_reports = {}
+
+    final_prose_reports = {}
+    final_structured_summaries = {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_slice = {}
+
+        for slice_num in selected_slice_numbers:
+            # 直接从字典中获取已经处理好的报告
+            text_report = text_reports_by_slice.get(slice_num)
+            visual_report = visual_reports_by_slice.get(slice_num)
+
+            if not text_report or not visual_report or "error" in str(text_report) or "error" in str(visual_report):
+                continue
+
+            # 提交并行任务
+            future = executor.submit(
+                _adjudicate_single_slice, 
+                agent_6, 
+                slice_num, 
+                text_report, 
+                visual_report
+            )
+            future_to_slice[future] = slice_num
+        
+        # 5. 收集结果
+        cprint(f"Submitting {len(future_to_slice)} final adjudication tasks to run in parallel...", 'magenta')
+        for future in tqdm(as_completed(future_to_slice), total=len(future_to_slice), desc="Finalizing Slices"):
+            slice_num = future_to_slice[future]
+            prose_report, structured_summary = future.result()
+            final_prose_reports[slice_num] = prose_report
+            final_structured_summaries[slice_num] = structured_summary
+            
+    # 函数现在返回一个包含两个字典的元组
+    return final_prose_reports, final_structured_summaries
+
 # ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # --- 5. 主执行逻辑 (Main Execution Logic) ---
-
 def main():
     # (这是主函数，负责编排整个流程)
     all_patient_results = {}
@@ -908,31 +979,20 @@ def main():
         }
         cprint(f"Stored selected paths for patient {patient_id}.", "blue")
 
-
-
-
-
         # 执行第一阶段，每时期10张图
         phase1_report = run_phase_1(selected_ap, selected_dp, selected_pvp)
-        # print(f"phase1 reports: {phase1_reports}")
         
-        # 2. 执行第二阶段
-        # all_images = selected_paths_ap + selected_paths_dp + selected_paths_pvp
-        phase2_report= run_phase_2(phase1_report, selected_numbers)
+        # 执行第二阶段
+        long_report= run_phase_2(phase1_report, selected_numbers)
 
-        # 每时期3张图
-        visual_report = run_phase_visual(selected_ap, selected_dp, selected_pvp, selected_numbers)
-        
-        # 3. 执行第三阶段
-        # prose_report, structured_summary = run_phase_3(long_report, cross_report, visual_report)
+        # 执行第三阶段
+        visual_report = run_phase_3(selected_ap, selected_dp, selected_pvp, selected_numbers)
+
+        # 执行第四阶段
+        prose_report, structured_summary = run_phase_4(long_report, visual_report, selected_numbers)
         
         # 收集结果
-        # all_patient_results[patient_id] = structured_summary
-
-
-
-
-
+        all_patient_results[patient_id] = structured_summary
 
 
     # 将所有病人挑选的5个图片的path保存到一个JSON文件中
@@ -946,7 +1006,7 @@ def main():
 
 
     # 将所有病人的结果保存到一个JSON文件中
-    output_filename = "selected_numbers.json"
+    output_filename = "fine_grained_results.json"
     with open(output_filename, 'w', encoding='utf-8') as f:
         json.dump(all_patient_results, f, ensure_ascii=False, indent=4)
     
