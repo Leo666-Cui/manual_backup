@@ -122,11 +122,10 @@ from safetensors.torch import load_file
 #         return x
 
 
-
-
 class Model(nn.Module):
-    def __init__(self, encoder, ori_encoder, text_prompt_len, num_slices, num_time_points, 
-                 num_co_attention_layers, d_model, num_heads, d_ffn, dropout):
+    def __init__(self, encoder, ori_encoder, text_prompt_len, 
+                 num_slices, num_time_points, num_co_attention_layers, d_model, num_heads, d_ffn, dropout,
+                 num_agg_heads, num_agg_layers_s1, num_agg_layers_s2):
         super(Model, self).__init__()
         
         self.encoder = encoder
@@ -158,6 +157,14 @@ class Model(nn.Module):
 
         self.temperature = nn.Parameter(torch.ones([]) * 0.07)
 
+        # 1. 为图像的3个时期（T=3）定义时序位置编码
+        #    维度: (1, 1, T, D)，为了能与 (B, S, T, D) 的图像特征广播相加
+        self.image_time_pos_encoder = nn.Parameter(torch.randn(1, 1, num_time_points, d_model))
+
+        # 2. 为文本的5个切片（S=5）定义空间位置编码
+        #    维度: (1, S, 1, D)，为了能与 (B, S, Q, D) 的文本特征广播相加
+        self.text_slice_pos_encoder = nn.Parameter(torch.randn(1, num_slices, 1, d_model))
+
         # --- 2. 协同注意力模型初始化 ---
         self.co_attention_model = CoAttentionModel(
             num_co_attention_layers=num_co_attention_layers,
@@ -167,12 +174,13 @@ class Model(nn.Module):
             dropout=dropout
         )
 
-        # --- 3. 分类头和融合层初始化 ---
-        self.classifier = nn.Linear(d_model * 2, 2)
-        self.fusion = nn.Sequential(
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.BatchNorm1d(d_model * 2)
+        self.aggregator = AggregationTransformer(
+            d_model=d_model,
+            num_heads=num_agg_heads,
+            d_ffn=d_ffn, # 可以复用 d_ffn
+            dropout=dropout,
+            num_layers_stage1=num_agg_layers_s1,
+            num_layers_stage2=num_agg_layers_s2
         )
 
     def forward(self, inputs, rad_feat):
@@ -195,7 +203,7 @@ class Model(nn.Module):
         image_latents_flat = self.encoder.encode_image(x_reshaped).float()
         image_latents = image_latents_flat.reshape(B, self.S, self.T, -1)
         image_latents = image_latents / image_latents.norm(dim=-1, keepdim=True)
-
+        image_latents = image_latents + self.image_time_pos_encoder # positional embedding
 
         # --- 文本特征提取 ---
         prompts = []
@@ -216,6 +224,7 @@ class Model(nn.Module):
             ])
             for i in range(rad_feat.shape[0]) # B
         ])
+        text_latents = text_latents + self.text_slice_pos_encoder # positional embedding
 
         # Part 2: 协同注意力融合
         # print(f'image_latents.shape: {image_latents.shape}') # torch.Size([B, 5, 3, d])
@@ -224,31 +233,10 @@ class Model(nn.Module):
         # print(f'fused_v.shape: {fused_v.shape}') # (B, 5, 3, D)
         # print(f'fused_t.shape: {fused_t.shape}') # (B, 5, 9, D)
 
-
-        # Part 3: 特征聚合与分类 (这部分代码天然就是动态的)
-        pooled_v = fused_v.mean(dim=2) # (B, S, D)
-        pooled_t = fused_t.mean(dim=2) # (B, S, D)
-        
-        combined_slice_features = torch.cat([pooled_v, pooled_t], dim=2) # (B, S, 2*D)
-        patient_level_features = combined_slice_features.mean(dim=1) # (B, 2*D)
-        
-        latents = self.fusion(patient_level_features)
-        output = self.classifier(latents)
+        # Part 3: 特征聚合与分类 
+        output = self.aggregator(fused_t)
         
         return output
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ==============================================================================
@@ -344,6 +332,93 @@ class CoAttentionModel(nn.Module):
         return final_s_v, final_s_t
 
 
+# ==============================================================================
+# 模块3: AggregationTransformer 
+# ==============================================================================
+class AggregationTransformer(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ffn: int, dropout: float, 
+                 num_layers_stage1: int, num_layers_stage2: int):
+        super().__init__()
+        
+        self.d_model = d_model
+
+        # --- Stage 1: Per-Question Aggregation (across 5 slices) ---
+        # 可学习的 [CLS] Token，用于聚合5个切片的特征
+        self.cls_token_stage1 = nn.Parameter(torch.randn(1, 1, d_model))
+        
+        # Stage 1 的 Transformer Encoder
+        stage1_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=num_heads, dim_feedforward=d_ffn, 
+            dropout=dropout, activation='relu', batch_first=True
+        )
+        self.transformer_stage1 = nn.TransformerEncoder(
+            stage1_encoder_layer, num_layers=num_layers_stage1
+        )
+
+        # --- Stage 2: Final Aggregation (across 9 questions) ---
+        # 另一个【独立】的可学习 [CLS] Token，用于聚合9个问题的特征
+        self.cls_token_stage2 = nn.Parameter(torch.randn(1, 1, d_model))
+        
+        # Stage 2 的 Transformer Encoder
+        stage2_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=num_heads, dim_feedforward=d_ffn, 
+            dropout=dropout, activation='relu', batch_first=True
+        )
+        self.transformer_stage2 = nn.TransformerEncoder(
+            stage2_encoder_layer, num_layers=num_layers_stage2
+        )
+
+        # --- Stage 3: Classification Head ---
+        self.classification_head = nn.Sequential(
+            nn.LayerNorm(d_model), # LayerNorm 通常比 BatchNorm 更适合Transformer的输出
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            # 最终的MLP，从d_model维降到2维
+            nn.Linear(d_model, 2)
+        )
+
+    def forward(self, fused_t: torch.Tensor) -> torch.Tensor:
+        B, S, Q, D = fused_t.shape # (B, 5, 9, D)
+        
+        # --- Stage 1: Per-Question Aggregation ---
+        # 1. 重排维度，将“问题”作为“伪批次”的一部分，以便并行处理
+        # (B, 5, 9, D) -> (B, 9, 5, D)
+        t_permuted = fused_t.permute(0, 2, 1, 3)
+        # (B, 9, 5, D) -> (B * 9, 5, D)
+        t_reshaped = t_permuted.reshape(B * Q, S, D)
+
+        # 2. 为每个序列添加 [CLS] Token
+        # 扩展 [CLS] Token 以匹配“伪批次”的大小
+        cls_tokens_s1 = self.cls_token_stage1.expand(B * Q, -1, -1)
+        # 拼接在序列开头
+        stage1_input = torch.cat([cls_tokens_s1, t_reshaped], dim=1) # (B * 9, 5+1, D)
+
+        # 3. 通过 Stage 1 Transformer
+        stage1_output = self.transformer_stage1(stage1_input)
+
+        # 4. 提取每个序列的 [CLS] Token 输出作为聚合后的特征
+        aggregated_per_question = stage1_output[:, 0, :] # (B * 9, D)
+
+        # --- Stage 2: Final Aggregation ---
+        # 5. 恢复维度，得到所有问题的聚合向量
+        # (B * 9, D) -> (B, 9, D)
+        stage2_input_features = aggregated_per_question.view(B, Q, D)
+
+        # 6. 再次添加 [CLS] Token
+        cls_tokens_s2 = self.cls_token_stage2.expand(B, -1, -1)
+        stage2_input = torch.cat([cls_tokens_s2, stage2_input_features], dim=1) # (B, 9+1, D)
+
+        # 7. 通过 Stage 2 Transformer
+        stage2_output = self.transformer_stage2(stage2_input)
+        
+        # 8. 提取最终的 [CLS] Token 输出，作为整个病人的特征表示
+        patient_feature = stage2_output[:, 0, :] # (B, D)
+
+        # --- Stage 3: Classification ---
+        # 9. 将最终特征送入分类头
+        logits = self.classification_head(patient_feature) # (B, 2)
+        
+        return logits
 
 
 
