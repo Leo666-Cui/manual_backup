@@ -3,43 +3,50 @@ import random
 import numpy as np
 import torch
 import monai
-from monai.data import ImageDataset
-from monai.transforms import apply_transform, Randomizable, Resize
+from monai.data import ImageReader
+from torch.utils.data import Dataset as TorchDataset
+from monai.transforms import apply_transform, Randomizable, Resize, LoadImage
 import torchvision.transforms.functional as TF
+import math  
+from scipy import ndimage  
+import torch.nn.functional as F
+import torchvision.transforms as transforms
 
 # 确保您的MONAI版本支持这些功能
-print(f"MONAI Version: {monai.__version__}")
+# print(f"MONAI Version: {monai.__version__}")
 
-class Png2dDataset(ImageDataset):
+class PatientMultiSliceDataset(TorchDataset):
     """
     一个用于处理2D PNG图像和掩码的数据集类。
     - 继承自 monai.data.ImageDataset，利用其加载器。
     - 同步图像和掩码的随机变换。
     - 结合了MONAI和Torchvision的变换流程。
     """
-    def __init__(self, image_files, seg_files, labels, rad_feat, 
-                 transform=None, seg_transform=None, train=False):
-
-        # 使用MONAI的ImageDataset的加载器 (默认会使用Pillow来加载PNG)
-        # image_only=False 会让加载器同时返回图像数据和元数据
-        super().__init__(image_files, labels=labels, transform=None, image_only=False)
+    def __init__(self, image_files, seg_files, labels, rad_feat, transform=None, seg_transform=None, train=False, base_dilation_iterations=10, random_dilation_range=5):
+        super().__init__()
         
         # 存储额外的文件和参数
+        self.image_files = image_files
         self.seg_files = seg_files
+        self.labels = labels
         self.rad_feat = rad_feat
+        self.transform = transform
+        self.seg_transform = seg_transform
         self.train = train
-        
-        # 分开存储MONAI和Torchvision的变换
-        self.slice_transforms = slice_transforms
+        self.base_dilation_iterations = base_dilation_iterations
+        self.random_dilation_range = random_dilation_range
 
         # 用于同步随机变换的随机数生成器
         self.rng = np.random.RandomState()
+        # 实例化一个标准的LoadImage加载器。
+        # image_only=True 表示我们只关心图像数据，不关心元数据（比如仿射矩阵等）
+        self.loader = LoadImage(image_only=True)
 
         self.slice_transforms = transforms.Compose([
             transforms.RandomAffine(
                 degrees=(-180, 180),
-                translate=(0.5, 0.5),
-                scale=(0.6, 1.4),
+                translate=(0.1, 0.1),
+                scale=(0.8, 1.2),
                 shear=(-10, 10),
                 fill=0
             ),
@@ -47,7 +54,7 @@ class Png2dDataset(ImageDataset):
             transforms.RandomVerticalFlip(p=0.5),
         ]) if train else None
 
-    def _pad_to_diagonal_square(self, img: Image.Image, fill=0) -> Image.Image:
+    def _pad_to_diagonal_square(self, img, fill=0):
         """
         [内部方法] 将PIL图像补白到一个以其对角线为边长的正方形。
         """
@@ -63,7 +70,39 @@ class Png2dDataset(ImageDataset):
         )
         return TF.pad(img, padding, fill=fill)
 
-    def _crop_based_on_mask_roi(self, img_np: np.ndarray, mask_np: np.ndarray, padding=10) -> (np.ndarray, np.ndarray):
+    def _random_dilate_mask_ndimage(self, seg_tensor):
+        """
+        [内部方法] 使用ndimage对输入的PyTorch Tensor掩码进行随机膨胀。
+        """
+        # 仅在训练模式下执行
+        if not self.train:
+            return seg_tensor
+
+        # 1. 计算随机的迭代次数
+        offset = random.randint(-self.random_dilation_range, self.random_dilation_range)
+        iterations = self.base_dilation_iterations + offset
+        
+        # 如果迭代次数小于等于0，则不进行膨胀
+        if iterations <= 0:
+            return seg_tensor
+            
+        # 2. 将 PyTorch Tensor 转换为 NumPy Array
+        #    ndimage 需要CPU上的NumPy数组
+        device = seg_tensor.device
+        # MONAI加载的seg是(1, H, W)，ndimage需要(H, W)
+        seg_np = seg_tensor.squeeze(0).cpu().numpy()
+
+        # 3. 执行ndimage膨胀
+        #    ndimage.binary_dilation需要一个布尔类型的输入
+        dilated_np = ndimage.binary_dilation((seg_np > 0), iterations=iterations)
+
+        # 4. 将结果转回 PyTorch Tensor
+        #    先将布尔型转为浮点型，再增加通道维度，并送回原来的设备
+        dilated_tensor = torch.from_numpy(dilated_np.astype(np.float32)).unsqueeze(0).to(device)
+        
+        return dilated_tensor
+
+    def _crop_based_on_mask_roi(self, img_np, mask_np, padding=10):
         """
         [内部方法] 根据掩码(mask)的ROI，同时裁剪图像和掩码的Numpy数组。
         这是为了确保裁剪后两者尺寸和位置完全对应。
@@ -91,126 +130,87 @@ class Png2dDataset(ImageDataset):
         
         return cropped_image, cropped_mask
 
+    def __len__(self):
+        """
+        返回数据集中样本的总数，即病人的数量。
+        """
+        return len(self.image_files)
 
-    def __getitem__(self, index: int):
-        # 1. 加载数据 & 设置同步种子
+    def __getitem__(self, index):
+        # 1. 获取该病人的所有文件路径
+        patient_image_paths = self.image_files[index]
+        patient_seg_paths = self.seg_files[index]
+
+        # 用于存储处理后的每个2D切片
+        processed_img_slices = []
+        processed_seg_slices = []
+
+        # 设置一个用于本次样本所有随机操作的同步种子
         seed = self.rng.randint(2**32)
+
+        # 2. 循环处理该病人的每一张切片
+        for img_path, seg_path in zip(patient_image_paths, patient_seg_paths):
+            # LoadImage的调用方式是直接调用实例本身，而不是调用.read()方法
+            # 它直接返回一个PyTorch张量
+            img_slice_tensor = self.loader(img_path)
+            seg_slice_tensor = self.loader(seg_path)
+            
+            # 确保是单通道
+            if img_slice_tensor.shape[0] > 1: img_slice_tensor = img_slice_tensor[0:1]
+            if seg_slice_tensor.shape[0] > 1: seg_slice_tensor = seg_slice_tensor[0:1]
+            
+            # 2.2 对掩码进行随机膨胀
+            seg_slice_tensor = self._random_dilate_mask_ndimage(seg_slice_tensor)
+
+            # 2.3 应用2D数据增强 (如果是训练模式)
+            if self.train and self.slice_transforms:
+                # 转为PIL Image以使用torchvision
+                img_slice_pil = TF.to_pil_image(img_slice_tensor)
+                seg_slice_pil = TF.to_pil_image(seg_slice_tensor)
+                
+                # 使用相同的种子确保变换同步
+                random.seed(seed)
+                torch.manual_seed(seed)
+                img_slice_aug = self.slice_transforms(img_slice_pil)
+                
+                random.seed(seed)
+                torch.manual_seed(seed)
+                seg_slice_aug = self.slice_transforms(seg_slice_pil)
+
+                # 变换后转回Tensor
+                img_slice_tensor = TF.to_tensor(img_slice_aug)
+                seg_slice_tensor = TF.to_tensor(seg_slice_aug)
+
+            # 将处理后的切片添加到列表中
+            processed_img_slices.append(img_slice_tensor)
+            processed_seg_slices.append(seg_slice_tensor)
+
+        # 3. 将处理后的2D切片列表堆叠成一个3D/4D张量
+        # torch.stack会在新的维度上堆叠，这里我们选择dim=-1
+        # 结果形状: (C, H, W, S)，其中 S 是切片数 (15)
+        final_img = torch.stack(processed_img_slices, dim=-1)
+        final_seg = torch.stack(processed_seg_slices, dim=-1)
         
-        # 使用父类(ImageDataset)的加载器加载图像和元数据
-        img, meta_data = self.loader(self.image_files[index])
-        
-        seg, seg_meta_data = None, None
-        if self.seg_files is not None:
-            seg, seg_meta_data = self.loader(self.seg_files[index])
-
-        # 2. 应用MONAI的变换 (通常用于加载、增加通道、调整方向等)
-        if self.transform is not None:
-            if isinstance(self.transform, Randomizable):
-                self.transform.set_random_state(seed=seed)
-            img, meta_data = apply_transform(self.transform, (img, meta_data), map_items=False, unpack_items=True)
-
-        if self.seg_files is not None and self.seg_transform is not None:
-            if isinstance(self.seg_transform, Randomizable):
-                self.seg_transform.set_random_state(seed=seed)
-            seg, seg_meta_data = apply_transform(self.seg_transform, (seg, seg_meta_data), map_items=False, unpack_items=True)
-            
-        # 3. 应用基于Torchvision的2D切片变换 (通常用于数据增强)
-        #    这是适配后的核心逻辑，直接对2D Tensor操作
-        if self.train is not None:
-            # MONAI加载的图像是Tensor，需要转为PIL Image以使用torchvision
-            # 假设图像是 [C, H, W]，我们取第一个通道
-            img_slice_pil = TF.to_pil_image(img[0])
-            seg_slice_pil = TF.to_pil_image(seg[0])
-            
-            # pad到正方形，再使用变换
-            img_padded = self._pad_to_diagonal_square(img_slice_pil)
-            seg_padded = self._pad_to_diagonal_square(seg_slice_pil)
-
-            # 使用相同的种子确保变换同步
-            random.seed(seed)
-            torch.manual_seed(seed)
-            img_slice_aug = self.slice_transforms(img_padded)
-            
-            random.seed(seed)
-            torch.manual_seed(seed)
-            seg_slice_aug = self.slice_transforms(seg_padded)
-
-            # 变换后转回Tensor
-            img = TF.to_tensor(img_slice_aug)
-            seg = TF.to_tensor(seg_slice_aug)
-
-
-        # 4. 最终尺寸调整 (Resize)
-        # MONAI的Resize可以直接作用于 [C, H, W] 的Tensor
-        resizer = Resize(spatial_size=(224, 224))
-        img_final = resizer(img_final)
-        seg_final = resizer(seg_final)
+        # 4. 最终的尺寸和格式调整
+        # MONAI的Resize可以直接作用于 (C, H, W, S) 的Tensor
+        resizer = Resize(spatial_size=(224, 224, 15)) # 确保深度也是15
+        final_img = resizer(final_img)
+        final_seg = resizer(final_seg)
+        # print(f"final_img.shape before: {final_img.shape}")
+        # print(f"final_seg.shape before: {final_seg.shape}")
+        final_img = final_img.repeat(3, 1, 1, 1) # 第 0 维度 通道维度重复3次,最终通道数从1变为3
+        final_seg = final_seg.repeat(3, 1, 1, 1)
+        # print(f"final_img.shape after: {final_img.shape}")
+        # print(f"final_seg.shape after: {final_seg.shape}")
 
         # 确保掩码是二值的 (0.0 或 1.0)
-        if seg is not None:
-            seg = (seg >= 0.5).float()
-
+        final_seg = (final_seg >= 0.5).float()
+        
         # 5. 组合所有数据并返回
         label = self.labels[index]
         rad_feature = self.rad_feat[index]
-        
-        # 从文件名提取ID
-        patient_id = self.image_files[index].split('/')[-1].split('_')[0]
+        patient_id = patient_image_paths[0].split('/')[-1].split('_')[0]
 
-        # 按照您的要求构建返回的元组
-        data = (img_final, seg_final, label, rad_feature, patient_id)
+        data = (final_img, final_seg, label, rad_feature, patient_id)
         
         return data
-
-
-
-
-# -------------------------------------------------------------------------------
-import torch
-from torch.utils.data import DataLoader
-from monai.transforms import Compose
-import torchvision.transforms as T
-
-# --- 1. 准备文件列表和元数据 (假设这些已准备好) ---
-# 您可以运行之前的脚本来生成这些文件列表
-img_dir = '/home/yxcui/FM-Bridge/testing_file/test_dataset/img_encoder_nii'
-roi_dir = '/home/yxcui/FM-Bridge/testing_file/test_dataset/img_encoder_roi'
-
-# os.listdir返回的文件名可能顺序不一致，排序可以确保img和seg一一对应
-train_images = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir)])
-train_segs = sorted([os.path.join(roi_dir, f) for f in os.listdir(roi_dir)])
-
-num_samples = len(train_images)
-# 找到所有病人ID，找到他们的label
-train_labels = torch.randint(0, 2, (num_samples, 9)).float() 
-train_rad_feat = torch.rand(num_samples, 9)
-
-# --- 2. 定义变换 ---
-train_transforms = Compose([EnsureChannelFirst()])
-val_transforms = Compose([EnsureChannelFirst()])
-
-# --- 3. 实例化Dataset和DataLoader ---
-print(f"准备创建含有 {num_samples} 个样本的数据集...")
-train_ds = Png2dDataset(
-    image_files=train_images,
-    seg_files=train_segs,
-    labels=train_labels,
-    rad_feat=train_rad_feat,
-    transform=train_transforms,
-    seg_transform=train_transforms,
-    train=True
-)
-
-# shuffle要和文本的顺序一样
-train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=torch.cuda.is_available(), worker_init_fn=worker_init_fn)
-
-# --- 4. 测试DataLoader ---
-print("从DataLoader中取出一批数据进行测试...")
-batch_data = next(iter(train_loader))
-batch_img, batch_seg, batch_label, batch_rad, batch_id = batch_data
-
-print(f"图像批次维度: {batch_img.shape}")      # 应该为 torch.Size([8, 1, 224, 224])
-print(f"掩码批次维度: {batch_seg.shape}")      # 应该为 torch.Size([8, 1, 224, 224])
-print(f"标签批次维度: {batch_label.shape}")    # 应该为 torch.Size([8, 9])
-print(f"特征批次维度: {batch_rad.shape}")    # 应该为 torch.Size([8, 9])
-print(f"批次中的ID示例: {batch_id[0]}")      # 打印第一个样本的ID
