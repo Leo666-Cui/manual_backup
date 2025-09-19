@@ -251,8 +251,12 @@ class CoAttentionLayer(nn.Module):
         
         # 文本到图像的注意力 (T2I)
         self.t2i_attention = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-        self.t2i_ffn = nn.Sequential(
-            nn.Linear(d_model, d_ffn), nn.ReLU(), nn.Dropout(dropout), nn.Linear(d_ffn, d_model)
+        # FFN
+        self.t2i_ffn = nn.Sequential( 
+            nn.Linear(d_model, d_ffn), 
+            nn.GELU(), 
+            nn.Dropout(dropout), 
+            nn.Linear(d_ffn, d_model)
         )
         self.t2i_norm1 = nn.LayerNorm(d_model)
         self.t2i_norm2 = nn.LayerNorm(d_model)
@@ -261,7 +265,10 @@ class CoAttentionLayer(nn.Module):
         # 图像到文本的注意力 (I2T)
         self.i2t_attention = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
         self.i2t_ffn = nn.Sequential(
-            nn.Linear(d_model, d_ffn), nn.ReLU(), nn.Dropout(dropout), nn.Linear(d_ffn, d_model)
+            nn.Linear(d_model, d_ffn), 
+            nn.GELU(), 
+            nn.Dropout(dropout), 
+            nn.Linear(d_ffn, d_model)
         )
         self.i2t_norm1 = nn.LayerNorm(d_model)
         self.i2t_norm2 = nn.LayerNorm(d_model)
@@ -280,6 +287,61 @@ class CoAttentionLayer(nn.Module):
         v_ffn_updated = self.i2t_ffn(s_v)
         s_v = self.i2t_norm2(s_v + self.i2t_dropout(v_ffn_updated))
         
+        return s_v, s_t
+
+class CoAttentionLayer(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ffn: int, dropout: float):
+        super().__init__()
+
+        # 文本到图像的注意力 T2I
+        self.t2i_norm_attn = nn.LayerNorm(d_model)
+        self.t2i_attention = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.t2i_dropout_attn = nn.Dropout(dropout)
+
+        self.t2i_norm_ffn = nn.LayerNorm(d_model)
+        self.t2i_ffn = nn.Sequential(
+            nn.Linear(d_model, d_ffn), 
+            nn.GELU(), 
+            nn.Dropout(dropout), 
+            nn.Linear(d_ffn, d_model)
+        )
+        self.t2i_dropout_ffn = nn.Dropout(dropout)
+
+        # 图像到文本的注意力 I2T 
+        self.i2t_norm_attn = nn.LayerNorm(d_model)
+        self.i2t_attention = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.i2t_dropout_attn = nn.Dropout(dropout)
+
+        self.i2t_norm_ffn = nn.LayerNorm(d_model)
+        self.i2t_ffn = nn.Sequential(
+            nn.Linear(d_model, d_ffn), 
+            nn.GELU(), 
+            nn.Dropout(dropout), 
+            nn.Linear(d_ffn, d_model)
+        )
+        self.i2t_dropout_ffn = nn.Dropout(dropout)
+
+    def forward(self, s_v: torch.Tensor, s_t: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        # --- T2I-Attention (Pre-Norm) ---
+        s_t_norm = self.t2i_norm_attn(s_t)
+        s_v_norm_for_t2i = self.i2t_norm_attn(s_v) # 复用I2T的第一个norm
+        t_updated, _ = self.t2i_attention(query=s_t_norm, key=s_v_norm_for_t2i, value=s_v_norm_for_t2i)
+        s_t = s_t + self.t2i_dropout_attn(t_updated)
+
+        s_t_norm = self.t2i_norm_ffn(s_t)
+        t_ffn_updated = self.t2i_ffn(s_t_norm)
+        s_t = s_t + self.t2i_dropout_ffn(t_ffn_updated)
+
+        # --- I2T-Attention (Pre-Norm) ---
+        s_v_norm = self.i2t_norm_attn(s_v)
+        s_t_norm_for_i2t = self.t2i_norm_attn(s_t) # 复用T2I的第二个norm
+        v_updated, _ = self.i2t_attention(query=s_v_norm, key=s_t_norm_for_i2t, value=s_t_norm_for_i2t)
+        s_v = s_v + self.i2t_dropout_attn(v_updated)
+
+        s_v_norm = self.i2t_norm_ffn(s_v)
+        v_ffn_updated = self.i2t_ffn(s_v_norm)
+        s_v = s_v + self.i2t_dropout_ffn(v_ffn_updated)
+
         return s_v, s_t
 
 # ==============================================================================
@@ -346,10 +408,10 @@ class AggregationTransformer(nn.Module):
         # 可学习的 [CLS] Token，用于聚合5个切片的特征
         self.cls_token_stage1 = nn.Parameter(torch.randn(1, 1, d_model))
         
-        # Stage 1 的 Transformer Encoder
+        # Stage 1 的 Transformer Encoder (9, 5, d) -> (9, d)
         stage1_encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=num_heads, dim_feedforward=d_ffn, 
-            dropout=dropout, activation='relu', batch_first=True
+            dropout=dropout, activation='gelu', batch_first=True, norm_first=True
         )
         self.transformer_stage1 = nn.TransformerEncoder(
             stage1_encoder_layer, num_layers=num_layers_stage1
@@ -359,10 +421,10 @@ class AggregationTransformer(nn.Module):
         # 另一个【独立】的可学习 [CLS] Token，用于聚合9个问题的特征
         self.cls_token_stage2 = nn.Parameter(torch.randn(1, 1, d_model))
         
-        # Stage 2 的 Transformer Encoder
+        # Stage 2 的 Transformer Encoder (9, d)-> (d)
         stage2_encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=num_heads, dim_feedforward=d_ffn, 
-            dropout=dropout, activation='relu', batch_first=True
+            dropout=dropout, activation='gelu', batch_first=True, norm_first=True
         )
         self.transformer_stage2 = nn.TransformerEncoder(
             stage2_encoder_layer, num_layers=num_layers_stage2
@@ -371,7 +433,7 @@ class AggregationTransformer(nn.Module):
         # --- Stage 3: Classification Head ---
         self.classification_head = nn.Sequential(
             nn.LayerNorm(d_model), # LayerNorm 通常比 BatchNorm 更适合Transformer的输出
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             # 最终的MLP，从d_model维降到2维
             nn.Linear(d_model, 2)
