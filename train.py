@@ -160,7 +160,7 @@ def main():
     parser.add_argument('--vision_prompt_dep', type=int, default=10)
     parser.add_argument('--vision_prompt_len', type=int, default=10)
     parser.add_argument('--use_wandb', action='store_true', default=False)
-    parser.add_argument('--contrastive_loss_weight', type=float, default=0)
+    # parser.add_argument('--contrastive_loss_weight', type=float, default=0)
     parser.add_argument('--orthogonal_loss_weight', type=float, default=0.1)
     parser.add_argument('--batch_size', type=int, default=2) # default=32
     parser.add_argument('--epochs', type=int, default=300) # default: 300
@@ -217,12 +217,15 @@ def main():
 
     # Hyperparameters
     D_MODEL = 512                  # Feature dimension from your encoder (e.g., CLIP's ViT-B/32)
-    NUM_SLICES = 5                 # S: Number of primary slices per patient
-    NUM_TIME_POINTS = 3            # T: Number of time points (phases) per slice
-    NUM_CO_ATTENTION_LAYERS = 4    # N: Number of co-attention layers to stack
+    NUM_SLICES = 5                 
+    NUM_TIME_POINTS = 3            
+    NUM_CO_ATTENTION_LAYERS = 4    # N: Number of co-attention layers to stack （考虑改）
     NUM_HEADS = 8                  # Number of heads in MultiheadAttention
     D_FFN = 2048                   # Dimension of the feed-forward network in the transformer layers
     DROPOUT = 0.1 
+    NUM_AGG_HEADS=NUM_HEADS        
+    NUM_AGG_LAYERS_S1=1            #（考虑改）
+    NUM_AGG_LAYERS_S2=2            #（考虑改）
 
     # Prepare training data
     with open(agent_train_json_path, 'r') as f:
@@ -340,7 +343,10 @@ def main():
         d_model=D_MODEL,
         num_heads=NUM_HEADS,
         d_ffn=D_FFN,
-        dropout=DROPOUT
+        dropout=DROPOUT,    
+        num_agg_heads=NUM_AGG_HEADS,        
+        num_agg_layers_s1=NUM_AGG_LAYERS_S1,      
+        num_agg_layers_s2=NUM_AGG_LAYERS_S2
     ).to(device)
 
     # Define loss function and optimizer
@@ -362,7 +368,7 @@ def main():
         print(f"epoch {epoch + 1}/{args.epochs}")
         model.train()
         epoch_loss = 0
-        epoch_contrastive_loss = 0
+        # epoch_contrastive_loss = 0
         epoch_orthogonal_loss = 0
         step = 0
         train_prob_all, train_label_all = [], []
@@ -376,161 +382,161 @@ def main():
             optimizer.zero_grad()
             outputs = model(inputs, rad_feat)
             
-    #         classification_loss = loss_function(outputs, labels)
-    #         loss = classification_loss + args.contrastive_loss_weight*model.contrastive_loss + args.orthogonal_loss_weight*model.orthogonal_loss
+            classification_loss = loss_function(outputs, labels)
+            loss = classification_loss + args.orthogonal_loss_weight*model.orthogonal_loss
             
-    #         loss.backward()
-    #         optimizer.step()
+            loss.backward()
+            optimizer.step()
             
-    #         train_prob = torch.nn.functional.softmax(outputs, dim=1)
-    #         train_prob_all.append(train_prob.detach().to("cpu").numpy())
-    #         train_label_all.append(labels.to("cpu").numpy())
-    #         epoch_loss += classification_loss.item()
-    #         epoch_contrastive_loss += model.contrastive_loss.item()
-    #         epoch_orthogonal_loss += model.orthogonal_loss.item()
-    #         train_pbar.set_postfix(loss=classification_loss.item())
+            train_prob = torch.nn.functional.softmax(outputs, dim=1)
+            train_prob_all.append(train_prob.detach().to("cpu").numpy())
+            train_label_all.append(labels.to("cpu").numpy())
+            epoch_loss += classification_loss.item()
+            # epoch_contrastive_loss += model.contrastive_loss.item()
+            epoch_orthogonal_loss += model.orthogonal_loss.item()
+            train_pbar.set_postfix(loss=classification_loss.item())
 
-    #     # Calculate training metrics
-    #     epoch_loss /= step
-    #     history['train_loss'].append(epoch_loss) # 记录训练loss
-    #     epoch_contrastive_loss /= step
-    #     epoch_orthogonal_loss /= step
-    #     epoch_loss_values.append(epoch_loss)
-    #     train_prob_all = np.concatenate(train_prob_all)
-    #     train_label_all = np.concatenate(train_label_all)
-    #     train_auc = roc_auc_score(train_label_all, train_prob_all[:, 1])
-    #     history['train_auc'].append(train_auc) # 记录训练AUC
-    #     train_acc = accuracy_score(train_label_all, train_prob_all[:, 1].round())
-    #     history['train_acc'].append(train_acc) # 记录训练ACC
-    #     train_f1 = f1_score(train_label_all, train_prob_all[:, 1].round())
-    #     history['train_f1'].append(train_f1) # 记录训练F1
+        # Calculate training metrics
+        epoch_loss /= step
+        history['train_loss'].append(epoch_loss) # 记录训练loss
+        # epoch_contrastive_loss /= step
+        epoch_orthogonal_loss /= step
+        epoch_loss_values.append(epoch_loss)
+        train_prob_all = np.concatenate(train_prob_all)
+        train_label_all = np.concatenate(train_label_all)
+        train_auc = roc_auc_score(train_label_all, train_prob_all[:, 1])
+        history['train_auc'].append(train_auc) # 记录训练AUC
+        train_acc = accuracy_score(train_label_all, train_prob_all[:, 1].round())
+        history['train_acc'].append(train_acc) # 记录训练ACC
+        train_f1 = f1_score(train_label_all, train_prob_all[:, 1].round())
+        history['train_f1'].append(train_f1) # 记录训练F1
         
-    #     print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}, contrastive loss: {epoch_contrastive_loss:.4f}, orthogonal loss: {epoch_orthogonal_loss:.4f}, train_auc: {train_auc:.4f}, train_acc: {train_acc:.4f}, train_f1: {train_f1:.4f}")
+        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}, contrastive loss: {epoch_contrastive_loss:.4f}, orthogonal loss: {epoch_orthogonal_loss:.4f}, train_auc: {train_auc:.4f}, train_acc: {train_acc:.4f}, train_f1: {train_f1:.4f}")
 
-    #     # Log training metrics
-    #     writer.add_scalar("Loss/train", epoch_loss, epoch)
-    #     writer.add_scalar("Loss/train_contrastive", epoch_contrastive_loss, epoch)
-    #     writer.add_scalar("Metrics/train_auc", train_auc, epoch)
-    #     writer.add_scalar("Metrics/train_acc", train_acc, epoch)
-    #     writer.add_scalar("Metrics/train_f1", train_f1, epoch)
+        # Log training metrics
+        writer.add_scalar("Loss/train", epoch_loss, epoch)
+        # writer.add_scalar("Loss/train_contrastive", epoch_contrastive_loss, epoch)
+        writer.add_scalar("Metrics/train_auc", train_auc, epoch)
+        writer.add_scalar("Metrics/train_acc", train_acc, epoch)
+        writer.add_scalar("Metrics/train_f1", train_f1, epoch)
 
-    #     # Validation
-    #     if (epoch + 1) % val_interval == 0:
-    #         model.eval()
-    #         val_prob_all_list, val_label_list = [], []
+        # Validation
+        if (epoch + 1) % val_interval == 0:
+            model.eval()
+            val_prob_all_list, val_label_list = [], []
             
-    #         with torch.no_grad():
-    #             val_epoch_loss = 0
-    #             step = 0
-    #             metric_count_all = 0
-    #             num_correct_all = 0
-    #             image_id_list = []
+            with torch.no_grad():
+                val_epoch_loss = 0
+                step = 0
+                metric_count_all = 0
+                num_correct_all = 0
+                image_id_list = []
                 
-    #             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
-    #             for val_data in val_pbar:
-    #                 step += 1
-    #                 val_images, segs, val_labels, rad_feat, valid_mask, image_id = val_data[0].to(device), val_data[1].to(device), val_data[2].to(device), val_data[3].to(device), val_data[4].to(device), val_data[5]
-    #                 image_id_list.extend(image_id)
-    #                 val_images = val_images * segs
-    #                 val_images = val_images.as_tensor()
-    #                 val_outputs = model(val_images, rad_feat, valid_mask)
-    #                 pred_all = val_outputs
-    #                 val_loss = loss_function(pred_all, val_labels)
-    #                 val_epoch_loss += val_loss.item()
-    #                 val_prob_all = torch.nn.functional.softmax(pred_all, dim=1)
-    #                 val_prob_all_list.append(val_prob_all.to("cpu").numpy())
-    #                 val_label_list.append(val_labels.to("cpu").numpy())
-    #                 value_all = torch.eq(pred_all.argmax(dim=1), val_labels)
-    #                 metric_count_all += len(value_all)
-    #                 num_correct_all += value_all.sum().item()
-    #                 val_pbar.set_postfix(val_loss=val_loss.item())
+                val_pbar = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
+                for val_data in val_pbar:
+                    step += 1
+                    val_images, segs, val_labels, rad_feat, valid_mask, image_id = val_data[0].to(device), val_data[1].to(device), val_data[2].to(device), val_data[3].to(device), val_data[4].to(device), val_data[5]
+                    image_id_list.extend(image_id)
+                    val_images = val_images * segs
+                    val_images = val_images.as_tensor()
+                    val_outputs = model(val_images, rad_feat, valid_mask)
+                    pred_all = val_outputs
+                    val_loss = loss_function(pred_all, val_labels)
+                    val_epoch_loss += val_loss.item()
+                    val_prob_all = torch.nn.functional.softmax(pred_all, dim=1)
+                    val_prob_all_list.append(val_prob_all.to("cpu").numpy())
+                    val_label_list.append(val_labels.to("cpu").numpy())
+                    value_all = torch.eq(pred_all.argmax(dim=1), val_labels)
+                    metric_count_all += len(value_all)
+                    num_correct_all += value_all.sum().item()
+                    val_pbar.set_postfix(val_loss=val_loss.item())
                 
-    #             # Calculate validation metrics
-    #             val_epoch_loss /= step
-    #             print(f"epoch {epoch + 1} validation loss: {val_epoch_loss:.4f}")
-    #             history['val_loss'].append(val_epoch_loss) # 记录验证loss
-    #             val_prob_all = np.concatenate(val_prob_all_list)
-    #             val_label = np.concatenate(val_label_list)
-    #             auc_all = roc_auc_score(val_label, val_prob_all[:, 1])
-    #             history['val_auc'].append(auc_all) # 记录验证AUC
-    #             acc_all = num_correct_all / metric_count_all
-    #             history['val_acc'].append(acc_all) # 记录验证ACC
-    #             f1_all = f1_score(val_label, val_prob_all[:, 1].round())
-    #             history['val_f1'].append(f1_all) # 记录验证F1
+                # Calculate validation metrics
+                val_epoch_loss /= step
+                print(f"epoch {epoch + 1} validation loss: {val_epoch_loss:.4f}")
+                history['val_loss'].append(val_epoch_loss) # 记录验证loss
+                val_prob_all = np.concatenate(val_prob_all_list)
+                val_label = np.concatenate(val_label_list)
+                auc_all = roc_auc_score(val_label, val_prob_all[:, 1])
+                history['val_auc'].append(auc_all) # 记录验证AUC
+                acc_all = num_correct_all / metric_count_all
+                history['val_acc'].append(acc_all) # 记录验证ACC
+                f1_all = f1_score(val_label, val_prob_all[:, 1].round())
+                history['val_f1'].append(f1_all) # 记录验证F1
                 
-    #             # Save best model
-    #             if auc_all > best_metric:
-    #                 best_metric = auc_all
-    #                 best_metric_epoch = epoch + 1
-    #                 torch.save(model.state_dict(), "best_metric_model_classification3d_array.pth")
-    #                 print("saved new best metric model")
+                # Save best model
+                if auc_all > best_metric:
+                    best_metric = auc_all
+                    best_metric_epoch = epoch + 1
+                    torch.save(model.state_dict(), "best_metric_model_classification3d_array.pth")
+                    print("saved new best metric model")
 
-    #                 # Create results directory if it doesn't exist
-    #                 os.makedirs('./results', exist_ok=True)
+                    # Create results directory if it doesn't exist
+                    os.makedirs('./results', exist_ok=True)
                     
-    #                 # Create DataFrame with results,best result's prob for all val patients
-    #                 results_df = pd.DataFrame({
-    #                     'image_id': image_id_list,
-    #                     'prob': val_prob_all[:, 1],  # Probability of positive class
-    #                     'label': val_label
-    #                 })
+                    # Create DataFrame with results,best result's prob for all val patients
+                    results_df = pd.DataFrame({
+                        'image_id': image_id_list,
+                        'prob': val_prob_all[:, 1],  # Probability of positive class
+                        'label': val_label
+                    })
                     
-    #                 # Save to CSV using run name
-    #                 results_df.to_csv(f'./results/{run_name}.csv', index=False)
+                    # Save to CSV using run name
+                    results_df.to_csv(f'./results/{run_name}.csv', index=False)
 
-    #             print(
-    #                 "current epoch: {} current auc: {:.4f} current acc: {:.4f} current f1: {:.4f}. best AUC: {:.4f} at epoch {}".format(
-    #                     epoch + 1, auc_all, acc_all, f1_all, best_metric, best_metric_epoch
-    #                 )
-    #             )
+                print(
+                    "current epoch: {} current auc: {:.4f} current acc: {:.4f} current f1: {:.4f}. best AUC: {:.4f} at epoch {}".format(
+                        epoch + 1, auc_all, acc_all, f1_all, best_metric, best_metric_epoch
+                    )
+                )
 
-    #             # Log validation metrics
-    #             writer.add_scalar("Loss/val", val_epoch_loss, epoch)
-    #             writer.add_scalar("Metrics/val_auc", auc_all, epoch)
-    #             writer.add_scalar("Metrics/val_acc", acc_all, epoch)
-    #             writer.add_scalar("Metrics/val_f1", f1_all, epoch)
-    #             writer.add_scalar("Metrics/best_val_auc", best_metric, epoch)
+                # Log validation metrics
+                writer.add_scalar("Loss/val", val_epoch_loss, epoch)
+                writer.add_scalar("Metrics/val_auc", auc_all, epoch)
+                writer.add_scalar("Metrics/val_acc", acc_all, epoch)
+                writer.add_scalar("Metrics/val_f1", f1_all, epoch)
+                writer.add_scalar("Metrics/best_val_auc", best_metric, epoch)
 
-    #     # Log metrics to wandb
-    #     if args.use_wandb:
-    #         wandb.log({
-    #             "epoch": epoch + 1,
-    #             "train_loss": epoch_loss,
-    #             "train_contrastive_loss": epoch_contrastive_loss,
-    #             "train_orthogonal_loss": epoch_orthogonal_loss,
-    #             "train_auc": train_auc,
-    #             "train_acc": train_acc,
-    #             "train_f1": train_f1,
-    #             "val_loss": val_epoch_loss,
-    #             "val_auc": auc_all,
-    #             "val_acc": acc_all,
-    #             "val_f1": f1_all,
-    #             "best_val_auc": best_metric
-    #         })
+        # Log metrics to wandb
+        if args.use_wandb:
+            wandb.log({
+                "epoch": epoch + 1,
+                "train_loss": epoch_loss,
+                # "train_contrastive_loss": epoch_contrastive_loss,
+                "train_orthogonal_loss": epoch_orthogonal_loss,
+                "train_auc": train_auc,
+                "train_acc": train_acc,
+                "train_f1": train_f1,
+                "val_loss": val_epoch_loss,
+                "val_auc": auc_all,
+                "val_acc": acc_all,
+                "val_f1": f1_all,
+                "best_val_auc": best_metric
+            })
 
-    #         if auc_all > best_metric:
-    #             wandb.run.summary["best_val_auc_all"] = best_metric
-    #             wandb.run.summary["best_epoch_all"] = best_metric_epoch
+            if auc_all > best_metric:
+                wandb.run.summary["best_val_auc_all"] = best_metric
+                wandb.run.summary["best_epoch_all"] = best_metric_epoch
 
-    # # Final summary
-    # print(f"Training completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
+    # Final summary
+    print(f"Training completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
     
-    # # Record final results
-    # writer.add_hparams(
-    #     {"lr": args.learning_rate, "batch_size": args.batch_size},
-    #     {
-    #         "best_val_auc": best_metric,
-    #         "best_epoch": best_metric_epoch,
-    #     }
-    # )
-    # plot_and_save_metrics(history, args.epochs, run_name)
+    # Record final results
+    writer.add_hparams(
+        {"lr": args.learning_rate, "batch_size": args.batch_size},
+        {
+            "best_val_auc": best_metric,
+            "best_epoch": best_metric_epoch,
+        }
+    )
+    plot_and_save_metrics(history, args.epochs, run_name)
 
-    # if args.use_wandb:
-    #     wandb.run.summary["final_best_auc_all"] = best_metric
-    #     wandb.run.summary["final_best_epoch_all"] = best_metric_epoch
-    #     wandb.finish()
+    if args.use_wandb:
+        wandb.run.summary["final_best_auc_all"] = best_metric
+        wandb.run.summary["final_best_epoch_all"] = best_metric_epoch
+        wandb.finish()
 
-    # writer.close()
+    writer.close()
 
 if __name__ == "__main__":
     main() 
