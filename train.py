@@ -122,18 +122,20 @@ def _build_list_from_json_base(json_file_path, base_dir, file_format_string):
     final_file_list = []
     sorted_patient_ids = sorted(data.keys())
     sorted_patient_ids = [f for f in sorted_patient_ids if f not in drop_id]
+    # print(f"这个阶段的patient有:{sorted_patient_ids}")
 
     for patient_id in sorted_patient_ids:
         patient_specific_paths = []
         slice_info = data[patient_id]
         slice_numbers = sorted(slice_info.keys(), key=int)
-        
+
         all_files_found = True
         
         for slice_num in slice_numbers:
+            formatted_slice_num = f"{int(slice_num):02d}"
             for phase in PHASES:
                 # 使用传入的文件名格式字符串来构建文件名
-                filename = f"{patient_id}_{phase}_{file_format_string}_{slice_num}.png"
+                filename = f"{patient_id}_{phase}_{file_format_string}_{formatted_slice_num}.png"
                 full_path = os.path.join(base_dir, filename)
                 
                 if not os.path.exists(full_path):
@@ -149,7 +151,7 @@ def _build_list_from_json_base(json_file_path, base_dir, file_format_string):
         if all_files_found:
             final_file_list.append(patient_specific_paths)
 
-    # print(f"成功为 {len(final_file_list)} 个病人构建了列表。")
+    print(f"成功为 {len(final_file_list)} 个病人构建了列表。")
     return final_file_list
 
 
@@ -162,7 +164,7 @@ def main():
     parser.add_argument('--use_wandb', action='store_true', default=False)
     # parser.add_argument('--contrastive_loss_weight', type=float, default=0)
     parser.add_argument('--orthogonal_loss_weight', type=float, default=0.1)
-    parser.add_argument('--batch_size', type=int, default=2) # default=32
+    parser.add_argument('--batch_size', type=int, default=32) # default=32
     parser.add_argument('--epochs', type=int, default=300) # default: 300
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--seed', type=int, default=42)
@@ -174,7 +176,8 @@ def main():
 
     # Create run name based on parameters
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    run_name = f'conattn_sepnorm_vdep{args.vision_prompt_dep}_vlen{args.vision_prompt_len}_tlen{args.text_prompt_len}_coloss{args.contrastive_loss_weight}_orloss{args.orthogonal_loss_weight}_dualattn_labelsmooth04_lr{args.learning_rate}_weight12_{timestamp}'
+    # run_name = f'conattn_sepnorm_vdep{args.vision_prompt_dep}_vlen{args.vision_prompt_len}_tlen{args.text_prompt_len}_coloss{args.contrastive_loss_weight}_orloss{args.orthogonal_loss_weight}_dualattn_labelsmooth04_lr{args.learning_rate}_weight12_{timestamp}'
+    run_name = f'conattn_sepnorm_vdep{args.vision_prompt_dep}_vlen{args.vision_prompt_len}_tlen{args.text_prompt_len}_dualattn_labelsmooth04_lr{args.learning_rate}_weight12_{timestamp}'
 
     # Set up tensorboard writer
     writer = SummaryWriter(f'runs_3d/{run_name}')
@@ -190,7 +193,7 @@ def main():
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "learning_rate": args.learning_rate,
-                "contrastive_loss_weight": args.contrastive_loss_weight,
+                # "contrastive_loss_weight": args.contrastive_loss_weight,
                 "orthogonal_loss_weight": args.orthogonal_loss_weight,
                 "text_prompt_len": args.text_prompt_len,
                 "vision_prompt_dep": args.vision_prompt_dep,
@@ -237,7 +240,7 @@ def main():
     train_images = build_image_list_from_json(json_file_path=agent_train_json_path, base_image_dir=nii_path)
     train_segs = build_seg_list_from_json(json_file_path=agent_train_json_path, base_seg_dir=roi_path)
     print(f"训练集病人数量: {len(train_images)}")
-    print(f"train_images: \n {train_images}")
+    # print(f"train_images: \n {train_images}")
     train_labels = []
     # train_rad_feat = []
     for f in train_images_id:
@@ -247,7 +250,7 @@ def main():
     print(f"train_labels: {train_labels}")
     # train_rad_feat = np.array(train_rad_feat, dtype=np.float32)
 
-    # 问题array
+    # 读取multi-agent对于问题的回答，回答为0/1：(Batch, Slice, Question)
     # 使用三层嵌套的列表推导式，同时在每一层进行排序
     all_train_answers_list = [
         [ # <-- 病人层 (外层)
@@ -265,7 +268,7 @@ def main():
     # --- 3. 转换为NumPy数组并返回 ---
     train_rad_feat = np.array(all_train_answers_list)
     print(f'train_rad_feat.shape: {train_rad_feat.shape}')
-    print(f'train_rad_feat: \n{train_rad_feat}')
+    # print(f'train_rad_feat: \n{train_rad_feat}')
 
 
     # Prepare validation data
@@ -276,6 +279,7 @@ def main():
     # valid_images_id = label_df[label_df['train'] == 0]['hospital number'].values
     valid_images = build_image_list_from_json(json_file_path=agent_val_json_path, base_image_dir=nii_path)
     valid_segs = build_seg_list_from_json(json_file_path=agent_val_json_path, base_seg_dir=roi_path)
+    print(f"测试集病人数量: {len(valid_images)}")
 
     valid_labels = []
     # valid_rad_feat = []
@@ -283,6 +287,7 @@ def main():
         valid_labels.append(label_df[label_df['hospital number'] == int(f)]['label'].values[0])
         # valid_rad_feat.append(label_df[label_df['hospital number'] == int(f)][rad_feat_ind].values[0])
     valid_labels = np.array(valid_labels, dtype=np.int64)
+    print(f"valid_labels: {valid_labels}")
     # valid_rad_feat = np.array(valid_rad_feat, dtype=np.float32)
 
     all_val_answers_list = [
@@ -297,7 +302,7 @@ def main():
     ]
     valid_rad_feat = np.array(all_val_answers_list)
     print(f'valid_rad_feat.shape: {valid_rad_feat.shape}')
-    print(f'valid_rad_feat: \n{valid_rad_feat}')
+    # print(f'valid_rad_feat: \n{valid_rad_feat}')
 
     # Define transforms
     train_transforms = Compose([EnsureChannelFirst()])
@@ -411,7 +416,8 @@ def main():
         train_f1 = f1_score(train_label_all, train_prob_all[:, 1].round())
         history['train_f1'].append(train_f1) # 记录训练F1
         
-        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}, contrastive loss: {epoch_contrastive_loss:.4f}, orthogonal loss: {epoch_orthogonal_loss:.4f}, train_auc: {train_auc:.4f}, train_acc: {train_acc:.4f}, train_f1: {train_f1:.4f}")
+        # print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}, contrastive loss: {epoch_contrastive_loss:.4f}, orthogonal loss: {epoch_orthogonal_loss:.4f}, train_auc: {train_auc:.4f}, train_acc: {train_acc:.4f}, train_f1: {train_f1:.4f}")
+        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}, orthogonal loss: {epoch_orthogonal_loss:.4f}, train_auc: {train_auc:.4f}, train_acc: {train_acc:.4f}, train_f1: {train_f1:.4f}")
 
         # Log training metrics
         writer.add_scalar("Loss/train", epoch_loss, epoch)
@@ -435,11 +441,11 @@ def main():
                 val_pbar = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
                 for val_data in val_pbar:
                     step += 1
-                    val_images, segs, val_labels, rad_feat, valid_mask, image_id = val_data[0].to(device), val_data[1].to(device), val_data[2].to(device), val_data[3].to(device), val_data[4].to(device), val_data[5]
+                    val_images, segs, val_labels, rad_feat, image_id = val_data[0].to(device), val_data[1].to(device), val_data[2].to(device), val_data[3].to(device), val_data[4]
                     image_id_list.extend(image_id)
                     val_images = val_images * segs
                     val_images = val_images.as_tensor()
-                    val_outputs = model(val_images, rad_feat, valid_mask)
+                    val_outputs = model(val_images, rad_feat)
                     pred_all = val_outputs
                     val_loss = loss_function(pred_all, val_labels)
                     val_epoch_loss += val_loss.item()
