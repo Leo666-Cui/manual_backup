@@ -387,6 +387,7 @@ import sys
 import argparse
 import numpy as np
 import torch
+import time
 from torch.utils.tensorboard import SummaryWriter
 import monai
 from monai.transforms import EnsureChannelFirst, Compose
@@ -668,9 +669,19 @@ def main():
         # Separate tracking for HCC and PFS tasks
         train_prob_hcc_all, train_label_hcc_all = [], []
         train_prob_pfs_all, train_label_pfs_all = [], []
-        
+
+        total_data_loading_time = 0
+        total_model_training_time = 0
+
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]")
+        # Start the timer for the very first batch's data loading
+        data_loading_start_time = time.perf_counter()
         for batch_data in train_pbar:
+            # The data is ready. Stop the data timer.
+            data_loading_end_time = time.perf_counter()
+            data_loading_duration = data_loading_end_time - data_loading_start_time
+            total_data_loading_time += data_loading_duration
+
             step += 1
             # Unpack both labels
             inputs, segs, labels_hcc, labels_pfs, rad_feat, valid_mask = (
@@ -684,6 +695,7 @@ def main():
             optimizer.zero_grad()
             
             # Get both outputs from model
+            model_step_start_time = time.perf_counter()
             hcc_outputs, pfs_outputs = model(inputs, rad_feat, valid_mask)
             
             # Compute losses for both tasks
@@ -696,6 +708,20 @@ def main():
             loss.backward()
             optimizer.step()
             
+            # Stop the model timer
+            model_step_end_time = time.perf_counter()
+            model_training_duration = model_step_end_time - model_step_start_time
+            total_model_training_time += model_training_duration
+            
+            # --- Update the progress bar with live timing info ---
+            train_pbar.set_postfix({
+                'Loss': f"{loss.item():.4f}",
+                'DataTime': f"{data_loading_duration:.3f}s",
+                'ModelTime': f"{model_training_duration:.3f}s"
+            })
+
+            data_loading_start_time = time.perf_counter()
+
             # Track predictions for both tasks
             train_prob_hcc = torch.nn.functional.softmax(hcc_outputs, dim=1)
             train_prob_pfs = torch.nn.functional.softmax(pfs_outputs, dim=1)
@@ -708,6 +734,13 @@ def main():
             epoch_contrastive_loss += model.contrastive_loss.item()
             epoch_orthogonal_loss += model.orthogonal_loss.item()
             train_pbar.set_postfix(loss=classification_loss.item())
+
+        # --- After the epoch is finished, print the average times ---
+        avg_data_time = total_data_loading_time / len(train_loader)
+        avg_model_time = total_model_training_time / len(train_loader)
+        print(f"\nEpoch {epoch + 1} Summary:")
+        print(f"  Average Data Loading Time per Batch: {avg_data_time:.4f} seconds")
+        print(f"  Average Model Training Time per Batch: {avg_model_time:.4f} seconds")
 
         # Calculate training metrics for both tasks
         epoch_loss /= step
